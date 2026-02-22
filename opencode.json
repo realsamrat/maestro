@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "Notion:notion": {
+      "type": "remote",
+      "url": "https://mcp.notion.com/mcp"
+    },
+    "maestro-status": {
+      "command": [
+        "/Applications/Maestro.app/Contents/MacOS/maestro-mcp-server"
+      ],
+      "environment": {
+        "MAESTRO_INSTANCE_ID": "6dd6a9a6-d0eb-4c53-a6aa-975b88956bdb",
+        "MAESTRO_SESSION_ID": "14",
+        "MAESTRO_STATUS_URL": "http://127.0.0.1:9900/status"
+      },
+      "type": "local"
+    },
+    "stripe:stripe": {
+      "type": "remote",
+      "url": "https://mcp.stripe.com"
+    }
+  }
+}
