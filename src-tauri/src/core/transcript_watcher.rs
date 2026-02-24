@@ -359,4 +359,114 @@ mod tests {
             "nonexistent file should produce no events"
         );
     }
+
+    /// Integration test: verifies the full TranscriptWatcher + EventBus flow
+    /// end-to-end by writing JSONL transcript data, starting a watcher, and
+    /// asserting that events are parsed and emitted through the EventBus.
+    #[tokio::test]
+    async fn test_full_transcript_watcher_flow() {
+        use std::time::Duration;
+
+        // 1. Set up EventBus with event capture
+        let (event_bus, captured) = test_event_bus();
+
+        // 2. Create TranscriptWatcher
+        let watcher = TranscriptWatcher::new(event_bus);
+
+        // 3. Create a temp directory and transcript file with initial content.
+        //    Using tempdir() + explicit file ensures the notify watcher can
+        //    reliably detect changes on macOS FSEvents.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("transcript.jsonl");
+        {
+            let line1 = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello world"}]},"uuid":"msg-001","timestamp":"2026-02-24T10:00:00Z"}"#;
+            let mut f = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(f, "{}", line1).unwrap();
+            f.flush().unwrap();
+        }
+
+        // 4. Start watching the transcript file.
+        //    Canonicalize the path so that on macOS the notify watcher's path
+        //    comparison works correctly (/var/folders -> /private/var/folders).
+        let canonical_path = transcript_path.canonicalize().unwrap();
+        watcher.start_watching(1, canonical_path.clone());
+
+        // 5. Wait for the initial catch-up read to process existing content
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 6. Verify the initial UserMessage was parsed and emitted
+        {
+            let events = captured.lock().unwrap();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    ClaudeEvent::UserMessage { text, .. } if text == "hello world"
+                )),
+                "Expected UserMessage with 'hello world', got {:?}",
+                *events
+            );
+        }
+
+        // 7. Append an assistant message with an Edit tool_use.
+        //    Open-append-close to produce a distinct filesystem event.
+        {
+            let line2 = r#"{"type":"assistant","message":{"model":"claude-opus-4-6","content":[{"type":"tool_use","id":"toolu_001","name":"Edit","input":{"file_path":"/src/main.rs","old_string":"old","new_string":"new"}}],"usage":{"input_tokens":100,"output_tokens":50}},"uuid":"msg-002","timestamp":"2026-02-24T10:00:05Z"}"#;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&canonical_path)
+                .unwrap();
+            writeln!(f, "{}", line2).unwrap();
+            f.flush().unwrap();
+        }
+
+        // 8. Poll for the expected event with a generous timeout.
+        //    macOS FSEvents can have variable latency, so we poll rather than
+        //    doing a single fixed sleep.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let events = captured.lock().unwrap();
+            let has_file_edited = events.iter().any(|e| matches!(
+                e,
+                ClaudeEvent::FileEdited { file_path, .. } if file_path == "/src/main.rs"
+            ));
+            if has_file_edited {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "Timed out waiting for FileEdited event. Got {:?}",
+                    *events
+                );
+            }
+        }
+
+        // 9. Verify all expected events were emitted
+        {
+            let events = captured.lock().unwrap();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    ClaudeEvent::FileEdited { file_path, .. } if file_path == "/src/main.rs"
+                )),
+                "Expected FileEdited for /src/main.rs, got {:?}",
+                *events
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    ClaudeEvent::ToolUseStarted { tool_name, .. } if tool_name == "Edit"
+                )),
+                "Expected ToolUseStarted for Edit, got {:?}",
+                *events
+            );
+        }
+
+        // 10. Verify watched sessions tracking
+        assert_eq!(watcher.watched_sessions(), vec![1]);
+
+        // 11. Cleanup: stop watching and verify it was removed
+        watcher.stop_watching(1);
+        assert!(watcher.watched_sessions().is_empty());
+    }
 }
