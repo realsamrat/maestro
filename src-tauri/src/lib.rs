@@ -12,6 +12,7 @@ use core::marketplace_manager::MarketplaceManager;
 use core::mcp_manager::McpManager;
 use core::plugin_manager::PluginManager;
 use core::status_server::StatusServer;
+use core::{ClaudeEvent, EventBus, TranscriptWatcher};
 use core::ProcessManager;
 use core::session_manager::SessionManager;
 use core::worktree_manager::WorktreeManager;
@@ -115,12 +116,36 @@ pub fn run() {
             let instance_id = uuid::Uuid::new_v4().to_string();
             log::info!("Maestro instance ID: {}", instance_id);
 
+            // Create EventBus - emits events to frontend via Tauri
+            let app_handle_for_bus = app.handle().clone();
+            let emit_fn: Arc<dyn Fn(ClaudeEvent) + Send + Sync> = Arc::new(move |event: ClaudeEvent| {
+                let _ = app_handle_for_bus.emit("claude-event", &event);
+            });
+            let event_bus = Arc::new(EventBus::new(emit_fn));
+
+            // Create TranscriptWatcher
+            let transcript_watcher = Arc::new(TranscriptWatcher::new(event_bus.clone()));
+
+            // Create hook emit callback
+            // When SessionStarted events arrive via hooks, start watching the transcript
+            let event_bus_for_hooks = event_bus.clone();
+            let transcript_watcher_for_hooks = transcript_watcher.clone();
+            let hook_emit_fn: Arc<dyn Fn(ClaudeEvent) + Send + Sync> = Arc::new(move |event: ClaudeEvent| {
+                if let ClaudeEvent::SessionStarted { session_id, ref transcript_path, .. } = event {
+                    transcript_watcher_for_hooks.start_watching(
+                        session_id,
+                        std::path::PathBuf::from(transcript_path),
+                    );
+                }
+                event_bus_for_hooks.emit(event);
+            });
+
             // Start the HTTP status server for MCP status reporting
             // IMPORTANT: This must be done synchronously so the server is ready
             // before any commands try to use it
             let app_handle = app.handle().clone();
             let server = tauri::async_runtime::block_on(async {
-                StatusServer::start(app_handle, instance_id, None).await
+                StatusServer::start(app_handle, instance_id, Some(hook_emit_fn)).await
             });
 
             match server {
@@ -138,6 +163,9 @@ pub fn run() {
                     return Err("Failed to start status server".into());
                 }
             }
+
+            app.manage(event_bus);
+            app.manage(transcript_watcher);
 
             Ok(())
         })
