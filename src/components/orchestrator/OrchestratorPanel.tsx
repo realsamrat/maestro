@@ -187,6 +187,7 @@ function StageForm({ editStage, onDone }: StageFormProps) {
   const [depIds, setDepIds] = useState<string[]>(editStage?.dependsOn ?? []);
   const [feedsFromIds, setFeedsFromIds] = useState<string[]>(editStage?.feedsFromStages ?? []);
   const [autoSend, setAutoSend] = useState(editStage?.autoSend ?? true);
+  const [useRufloMemory, setUseRufloMemory] = useState(editStage?.useRufloMemory ?? false);
   const [lifecycle, setLifecycle] = useState<SessionLifecycle>(editStage?.sessionLifecycle ?? "fresh-on-rework");
   const [routingRules, setRoutingRules] = useState<RoutingRule[]>(editStage?.routingRules ?? []);
   const [autoBranch, setAutoBranch] = useState(editStage?.autoBranch ?? true);
@@ -251,6 +252,7 @@ function StageForm({ editStage, onDone }: StageFormProps) {
       dependsOn: depIds,
       feedsFromStages: feedsFromIds,
       autoSend,
+      useRufloMemory,
       sessionLifecycle: lifecycle,
       routingRules,
       reviewQueue: [],
@@ -566,6 +568,17 @@ function StageForm({ editStage, onDone }: StageFormProps) {
         <span className="text-[10px] text-maestro-muted">Auto-send when deps complete</span>
       </div>
 
+      {/* Ruflo memory toggle */}
+      <label className="flex items-center gap-2 text-xs text-maestro-muted cursor-pointer">
+        <input
+          type="checkbox"
+          checked={useRufloMemory}
+          onChange={(e) => setUseRufloMemory(e.target.checked)}
+          className="accent-maestro-accent"
+        />
+        Use Ruflo memory (requires Ruflo MCP installed)
+      </label>
+
       {/* Actions */}
       <div className="flex justify-end gap-2">
         <button
@@ -728,6 +741,7 @@ function PipelineTab() {
   const templates = usePipelineStore((s) => s.templates);
   const saveTemplate = usePipelineStore((s) => s.saveTemplate);
   const deleteTemplate = usePipelineStore((s) => s.deleteTemplate);
+  const processReviewQueue = usePipelineStore((s) => s.processReviewQueue);
   const sessions = useSessionStore((s) => s.sessions);
 
   const [showAddForm, setShowAddForm] = useState(false);
@@ -785,6 +799,21 @@ function PipelineTab() {
 
     // Clear any previous error for this stage
     setStageErrors((prev) => { const n = { ...prev }; delete n[stage.id]; return n; });
+
+    // For review stages: use processReviewQueue if items are waiting
+    if (stage.type === "review") {
+      const freshStage = stages.find((s) => s.id === stage.id);
+      const hasWaiting = freshStage?.reviewQueue.some((item) => item.reviewStatus === "waiting");
+      if (hasWaiting) {
+        processReviewQueue(stage.id);
+        return;
+      }
+      setStageErrors((prev) => ({
+        ...prev,
+        [stage.id]: "No work queued yet — waiting for an upstream task stage to finish.",
+      }));
+      return;
+    }
 
     try {
       let promptText = stage.taskPrompt;

@@ -89,6 +89,8 @@ export interface PipelineStage {
   autoBranchPrefix: string;
   /** Attached image file paths to send alongside the prompt */
   attachedImages?: { path: string }[];
+  /** If true, prompt is wrapped with Ruflo memory_search/memory_store calls */
+  useRufloMemory: boolean;
 }
 
 // --- Default keywords ---
@@ -109,6 +111,43 @@ function defaultLifecycle(type: StageType): SessionLifecycle {
 function extractFeedback(statusMessage: string): string {
   const match = statusMessage.match(/CHANGES:\s*([\s\S]+)/i);
   return match ? match[1].trim() : statusMessage;
+}
+
+/** Collects branch + summary context from all completed dependsOn stages. */
+function buildDepContextPreamble(stage: PipelineStage, allStages: PipelineStage[]): string {
+  const deps = stage.dependsOn
+    .map((id) => allStages.find((s) => s.id === id))
+    .filter(
+      (s): s is PipelineStage =>
+        !!s &&
+        (s.status === "done" || s.status === "skipped") &&
+        !!(s.sourceBranch || s.sourceStatusMessage)
+    );
+
+  if (deps.length === 0) return "";
+
+  const lines = ["**Context from upstream stages:**", ""];
+  for (const dep of deps) {
+    lines.push(`**${dep.name}**`);
+    if (dep.sourceBranch) lines.push(`- Branch: \`${dep.sourceBranch}\``);
+    if (dep.sourceStatusMessage) lines.push(`- Summary: ${dep.sourceStatusMessage}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** Wraps a prompt with Ruflo memory_search/memory_store call instructions. */
+function wrapWithRufloMemory(stageName: string, promptText: string): string {
+  return [
+    `Before starting, use the memory_search MCP tool to find relevant patterns:`,
+    `  memory_search("${stageName}")`,
+    `Apply any relevant patterns to guide your approach.`,
+    ``,
+    promptText,
+    ``,
+    `After completing your work, use the memory_store MCP tool to save what worked:`,
+    `  memory_store("${stageName}: <concise summary of approach and outcome>")`,
+  ].join("\n");
 }
 
 /** Generates a git-safe branch name from a stage name and prefix. */
@@ -234,6 +273,7 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
           autoBranch: stageData.autoBranch ?? true,
           autoBranchPrefix: stageData.autoBranchPrefix ?? "feature/",
           attachedImages: stageData.attachedImages ?? [],
+          useRufloMemory: stageData.useRufloMemory ?? false,
         };
         set((s) => ({ stages: [...s.stages, newStage] }));
       },
@@ -282,7 +322,10 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
         if (doneStage.type === "task" || doneStage.type === "pr") {
           const currentStages = get().stages;
           const reviewStages = currentStages.filter(
-            (s) => s.type === "review" && s.feedsFromStages.includes(doneStage.id)
+            (s) =>
+              s.type === "review" &&
+              (s.feedsFromStages.includes(doneStage.id) ||
+                s.dependsOn.includes(doneStage.id))
           );
 
           for (const reviewStage of reviewStages) {
@@ -590,7 +633,10 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
         );
         if (!nextItem) return; // Queue empty
 
-        const prompt = get().buildReviewPrompt(nextItem, reviewerStage);
+        const basePrompt = get().buildReviewPrompt(nextItem, reviewerStage);
+        const prompt = reviewerStage.useRufloMemory
+          ? wrapWithRufloMemory(reviewerStage.name, basePrompt)
+          : basePrompt;
 
         const sendReview = async () => {
           // For always-fresh: send /clear to reset Claude's conversation context
@@ -803,13 +849,24 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
               promptText = get().buildTesterPrompt(freshStage);
             }
 
+            // Inject upstream context for task/pr stages with dependsOn
+            if (capturedStage.type === "task" || capturedStage.type === "pr") {
+              const depContext = buildDepContextPreamble(capturedStage, get().stages);
+              if (depContext) {
+                promptText = `${depContext}\n\n${promptText}`;
+              }
+            }
+
             // Feature C: Prepend image file paths (Claude Code reads them as attachments)
             const imagePaths = (capturedStage.attachedImages ?? [])
               .map((img) => img.path)
               .join(" ");
             const fullPrompt = imagePaths ? `${imagePaths} ${promptText}` : promptText;
 
-            await sendPromptToSession(capturedStage.sessionId, fullPrompt);
+            const fullPromptWithMemory = capturedStage.useRufloMemory
+              ? wrapWithRufloMemory(capturedStage.name, fullPrompt)
+              : fullPrompt;
+            await sendPromptToSession(capturedStage.sessionId, fullPromptWithMemory);
           };
 
           send().catch((err) => {
@@ -863,11 +920,22 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
             promptText = get().buildTesterPrompt(freshStage);
           }
 
+          // Inject upstream context for task/pr stages with dependsOn
+          if (stage.type === "task" || stage.type === "pr") {
+            const depContext = buildDepContextPreamble(stage, get().stages);
+            if (depContext) {
+              promptText = `${depContext}\n\n${promptText}`;
+            }
+          }
+
           // Feature C: Prepend image file paths (Claude Code reads them as attachments)
           const imagePaths = (stage.attachedImages ?? []).map((img) => img.path).join(" ");
           const fullPrompt = imagePaths ? `${imagePaths} ${promptText}` : promptText;
 
-          await sendPromptToSession(stage.sessionId, fullPrompt);
+          const fullPromptWithMemory = stage.useRufloMemory
+            ? wrapWithRufloMemory(stage.name, fullPrompt)
+            : fullPrompt;
+          await sendPromptToSession(stage.sessionId, fullPromptWithMemory);
         };
 
         send().catch((err) => {
@@ -944,6 +1012,7 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
             autoBranch: data.autoBranch ?? true,
             autoBranchPrefix: data.autoBranchPrefix ?? "feature/",
             attachedImages: data.attachedImages ?? [],
+            useRufloMemory: data.useRufloMemory ?? false,
           };
         });
         set({ stages });
@@ -973,6 +1042,7 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
               autoBranch: s.autoBranch ?? true,
               autoBranchPrefix: s.autoBranchPrefix ?? "feature/",
               attachedImages: s.attachedImages ?? [],
+              useRufloMemory: s.useRufloMemory ?? false,
             };
           });
           state.pendingApprovals = state.pendingApprovals ?? [];

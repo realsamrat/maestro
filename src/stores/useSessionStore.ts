@@ -269,10 +269,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           pendingInit = listen<SessionStatusPayload>("session-status-changed", (event) => {
             const { session_id, project_path, status, message, needs_input_prompt } = event.payload;
 
-            // Check if session exists in store
-            const sessionExists = get().sessions.some(
-              (s) => s.id === session_id && s.project_path === project_path
-            );
+            // Check if session exists in store (match only on session_id)
+            const sessionExists = get().sessions.some((s) => s.id === session_id);
 
             if (!sessionExists) {
               // Buffer this status update - it will be applied when the session is added
@@ -289,7 +287,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
             set((state) => ({
               sessions: state.sessions.map((s) =>
-                s.id === session_id && s.project_path === project_path
+                s.id === session_id
                   ? {
                       ...s,
                       status,
