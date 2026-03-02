@@ -71,6 +71,8 @@ interface PreLaunchCardProps {
   onCreateBranch?: (name: string, andCheckout: boolean, repoPath?: string) => Promise<void>;
   onModeChange: (mode: AiMode) => void;
   onBranchChange: (branch: string | null) => void;
+  /** Called when the branch dropdown is opened, to refresh the branch list. */
+  onRefreshBranches?: () => void;
   onMcpToggle: (serverName: string) => void;
   onSkillToggle: (skillId: string) => void;
   onPluginToggle: (pluginId: string) => void;
@@ -129,6 +131,7 @@ export function PreLaunchCard({
   onCreateBranch,
   onModeChange,
   onBranchChange,
+  onRefreshBranches,
   onMcpToggle,
   onSkillToggle,
   onPluginToggle,
@@ -442,7 +445,10 @@ export function PreLaunchCard({
             <>
               <button
                 type="button"
-                onClick={() => setBranchDropdownOpen(!branchDropdownOpen)}
+                onClick={() => {
+                  if (!branchDropdownOpen) onRefreshBranches?.();
+                  setBranchDropdownOpen(!branchDropdownOpen);
+                }}
                 disabled={isLoadingBranches}
                 className="flex w-full items-center justify-between gap-2 rounded border border-maestro-border bg-maestro-card px-3 py-2 text-left text-sm text-maestro-text transition-colors hover:border-maestro-accent/50 disabled:opacity-50"
               >
@@ -1057,8 +1063,8 @@ export function PreLaunchCard({
           )}
         </div>
 
-        {/* MCP Servers Selector */}
-        <div className="relative" ref={mcpDropdownRef}>
+        {/* MCP Servers Selector — only Claude and OpenCode support MCP */}
+        {(slot.mode === "Claude" || slot.mode === "OpenCode") && <div className="relative" ref={mcpDropdownRef}>
           <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-maestro-muted">
             MCP Servers
           </label>
@@ -1173,10 +1179,10 @@ export function PreLaunchCard({
               )}
             </>
           )}
-        </div>
+        </div>}
 
-        {/* Plugins & Skills Selector */}
-        <div className="relative" ref={pluginsSkillsDropdownRef}>
+        {/* Plugins & Skills Selector — only Claude supports ~/.claude plugins and skills */}
+        {slot.mode === "Claude" && <div className="relative" ref={pluginsSkillsDropdownRef}>
           <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-maestro-muted">
             Plugins & Skills
           </label>
@@ -1379,7 +1385,7 @@ export function PreLaunchCard({
               )}
             </>
           )}
-        </div>
+        </div>}
 
         {/* Launch Button */}
         <button
