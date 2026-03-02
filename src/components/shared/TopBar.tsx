@@ -5,6 +5,7 @@ import {
   GitMerge,
   Loader2,
   Minus,
+  Network,
   PanelLeft,
   Square,
   X,
@@ -27,6 +28,8 @@ interface TopBarProps {
   hideWindowControls?: boolean;
   /** Called when branch is switched */
   onBranchChanged?: (newBranch: string) => void;
+  showOrchestrator?: boolean;
+  onToggleOrchestrator?: () => void;
 }
 
 export function TopBar({
@@ -38,6 +41,8 @@ export function TopBar({
   gitPanelOpen,
   hideWindowControls = false,
   onBranchChanged,
+  showOrchestrator,
+  onToggleOrchestrator,
 }: TopBarProps) {
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
@@ -98,7 +103,7 @@ export function TopBar({
   );
 
   return (
-    <div data-tauri-drag-region className="no-select flex h-10 flex-1 items-center bg-maestro-bg">
+    <div data-tauri-drag-region className="no-select flex h-10 flex-1 min-w-0 items-center bg-maestro-bg">
       {/* Left: collapse toggle + branch area (inset from CSS var for macOS traffic lights) */}
       <div
         className="flex items-center gap-2 pr-2"
@@ -166,6 +171,19 @@ export function TopBar({
 
       {/* Right: action icons */}
       <div className="flex items-center gap-0.5 mr-1">
+        <button
+          type="button"
+          onClick={onToggleOrchestrator}
+          className={`rounded p-1.5 transition-colors ${
+            showOrchestrator
+              ? "text-maestro-accent hover:bg-maestro-accent/10"
+              : "text-maestro-muted hover:bg-maestro-card hover:text-maestro-text"
+          }`}
+          aria-label="Orchestrator"
+          title="Orchestrator"
+        >
+          <Network size={14} />
+        </button>
         <button
           type="button"
           onClick={onToggleGitPanel}

@@ -277,6 +277,43 @@ pub async fn kill_all_sessions(state: State<'_, ProcessManager>) -> Result<u32, 
     pm.kill_all_sessions().await
 }
 
+/// Returns the buffered PTY output (scrollback) for a session.
+///
+/// Called by the frontend on mount to restore terminal history after a WebView
+/// reload. Returns an empty string if the session does not exist or has no
+/// buffered output yet.
+#[tauri::command]
+pub async fn get_session_scrollback(
+    session_id: u32,
+    process_manager: State<'_, ProcessManager>,
+) -> Result<String, String> {
+    Ok(process_manager
+        .get_session_scrollback(session_id)
+        .unwrap_or_default())
+}
+
+/// Kills only PTY sessions whose child process is no longer alive.
+///
+/// Use this instead of `kill_all_sessions` on frontend startup so that live
+/// sessions survive a WebView reload and can be reconnected. Also removes the
+/// corresponding entries from the SessionManager to keep state consistent.
+/// Returns the number of sessions cleaned up.
+#[tauri::command]
+pub async fn cleanup_dead_sessions(
+    process_manager: State<'_, ProcessManager>,
+    session_manager: State<'_, SessionManager>,
+) -> Result<u32, String> {
+    let dead_ids = process_manager.cleanup_dead_sessions().await;
+    let count = dead_ids.len() as u32;
+    for id in dead_ids {
+        session_manager.remove_session(id);
+    }
+    if count > 0 {
+        log::info!("cleanup_dead_sessions: removed {} dead session(s)", count);
+    }
+    Ok(count)
+}
+
 /// Checks if a command is available in the user's PATH.
 ///
 /// On macOS/Linux, when the app is launched from GUI launchers (Raycast, Spotlight),
@@ -285,54 +322,49 @@ pub async fn kill_all_sessions(state: State<'_, ProcessManager>) -> Result<u32, 
 /// issues with shell plugins like powerlevel10k).
 ///
 /// On Windows, uses `where.exe` to check.
+
+/// Resolves the full path of a CLI command by searching PATH and common installation directories.
+/// Returns `None` if the command is not found.
+/// Used by both `check_cli_available` and `enhance_prompt_with_claude`.
+#[cfg(unix)]
+fn resolve_cli_path(command: &str) -> Option<String> {
+    let mut paths: Vec<String> = Vec::new();
+
+    if let Ok(env_path) = std::env::var("PATH") {
+        paths.extend(env_path.split(':').map(String::from));
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push("/opt/homebrew/bin".to_string());
+        paths.push("/opt/homebrew/sbin".to_string());
+        paths.push("/usr/local/bin".to_string());
+        paths.push("/usr/local/sbin".to_string());
+        paths.push(format!("{}/.npm-global/bin", home));
+        paths.push(format!("{}/node_modules/.bin", home));
+        paths.push(format!("{}/.cargo/bin", home));
+        paths.push(format!("{}/go/bin", home));
+        paths.push(format!("{}/.local/bin", home));
+        paths.push(format!("{}/.pyenv/shims", home));
+        paths.push(format!("{}/.rbenv/shims", home));
+    }
+
+    for dir in &paths {
+        let cmd_path = format!("{}/{}", dir, command);
+        if std::path::Path::new(&cmd_path).exists() {
+            log::debug!("Found {} at {}", command, cmd_path);
+            return Some(cmd_path);
+        }
+    }
+
+    log::debug!("Command {} not found in PATH", command);
+    None
+}
+
 #[tauri::command]
 pub async fn check_cli_available(command: String) -> Result<bool, String> {
     #[cfg(unix)]
     {
-        // Search for command in PATH and common installation directories
-        // We avoid spawning a shell because shell plugins (oh-my-zsh, powerlevel10k)
-        // can hang or abort when run without a TTY
-        let mut paths: Vec<String> = Vec::new();
-
-        // Start with current environment PATH
-        if let Ok(env_path) = std::env::var("PATH") {
-            paths.extend(env_path.split(':').map(String::from));
-        }
-
-        // Add common user installation directories that GUI launchers often miss
-        if let Ok(home) = std::env::var("HOME") {
-            // Homebrew on Apple Silicon
-            paths.push("/opt/homebrew/bin".to_string());
-            paths.push("/opt/homebrew/sbin".to_string());
-            // Homebrew on Intel Mac
-            paths.push("/usr/local/bin".to_string());
-            paths.push("/usr/local/sbin".to_string());
-            // npm global installations
-            paths.push(format!("{}/.npm-global/bin", home));
-            paths.push(format!("{}/node_modules/.bin", home));
-            // Cargo/Rust
-            paths.push(format!("{}/.cargo/bin", home));
-            // Go
-            paths.push(format!("{}/go/bin", home));
-            // Python user installs
-            paths.push(format!("{}/.local/bin", home));
-            // pyenv
-            paths.push(format!("{}/.pyenv/shims", home));
-            // rbenv
-            paths.push(format!("{}/.rbenv/shims", home));
-        }
-
-        // Search for command in all PATH directories
-        for dir in &paths {
-            let cmd_path = format!("{}/{}", dir, command);
-            if std::path::Path::new(&cmd_path).exists() {
-                log::debug!("Found {} at {}", command, cmd_path);
-                return Ok(true);
-            }
-        }
-
-        log::debug!("Command {} not found in PATH", command);
-        Ok(false)
+        Ok(resolve_cli_path(&command).is_some())
     }
 
     #[cfg(windows)]
@@ -345,5 +377,63 @@ pub async fn check_cli_available(command: String) -> Result<bool, String> {
             .await
             .map_err(|e| format!("Failed to check CLI: {}", e))?;
         Ok(output.status.success())
+    }
+}
+
+/// Enhances a pipeline task prompt using the local `claude` CLI in print mode (`-p`).
+/// Uses the user's existing Claude Code subscription — no API key required.
+/// Returns the improved prompt text, or an error string if enhancement fails.
+#[tauri::command]
+pub async fn enhance_prompt_with_claude(
+    prompt: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let claude_path = resolve_cli_path("claude")
+            .ok_or_else(|| "claude CLI not found — make sure Claude Code is installed".to_string())?;
+
+        let meta_prompt = format!(
+            "Improve this pipeline task prompt for a Claude AI coding agent working on a software project.\n\n\
+Rules:\n\
+- Keep the original intent intact — only clarify and expand\n\
+- Add technical specifics if they are implied (framework, file paths, patterns to follow)\n\
+- Add brief acceptance criteria if missing\n\
+- Ensure it ends with: When done, call maestro_status(\"finished - <brief summary of what was done>\")\n\
+- Return ONLY the improved prompt — no preamble, no explanations, no markdown fences\n\n\
+Original prompt:\n\"\"\"\n{}\n\"\"\"",
+            prompt
+        );
+
+        let mut cmd = tokio::process::Command::new(&claude_path);
+        cmd.args(["--output-format", "text", "-p", &meta_prompt])
+            .env("NO_COLOR", "1")
+            .env("FORCE_COLOR", "0");
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            cmd.output(),
+        )
+        .await
+        .map_err(|_| "Enhancement timed out after 60s — claude may be slow or offline".to_string())?
+        .map_err(|e| format!("Failed to run claude: {}", e))?;
+
+        if output.status.success() {
+            let text = String::from_utf8(output.stdout)
+                .map_err(|e| format!("Invalid UTF-8 in claude output: {}", e))?;
+            Ok(text.trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("claude returned an error: {}", stderr.trim()))
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        Err("Prompt enhancement is not yet supported on Windows".to_string())
     }
 }

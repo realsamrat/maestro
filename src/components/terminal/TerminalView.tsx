@@ -14,7 +14,7 @@ import { ActivityFeed } from "@/components/session/ActivityFeed";
 import { isGitWorktree } from "@/lib/git";
 import { useSessionBranch } from "@/hooks/useSessionBranch";
 import { buildFontFamily, waitForFont } from "@/lib/fonts";
-import { getBackendInfo, killSession, onPtyOutput, resizePty, savePastedImage, signalTerminalReady, writeStdin, type BackendInfo } from "@/lib/terminal";
+import { getBackendInfo, getSessionScrollback, killSession, onPtyOutput, resizePty, savePastedImage, signalTerminalReady, writeStdin, type BackendInfo } from "@/lib/terminal";
 import { DEFAULT_THEME, LIGHT_THEME, toXtermTheme } from "@/lib/terminalTheme";
 import { useMcpStore } from "@/stores/useMcpStore";
 import { type AiMode, type BackendSessionStatus, useSessionStore } from "@/stores/useSessionStore";
@@ -395,6 +395,18 @@ export const TerminalView = memo(function TerminalView({
           // Container may not be sized yet
         }
       });
+
+      // Restore scrollback from a previous WebView reload.
+      // Writing history BEFORE subscribing to live events ensures correct
+      // ordering: past output appears first, then new live output follows.
+      try {
+        const scrollback = await getSessionScrollback(sessionId);
+        if (scrollback && !disposed) {
+          term.write(scrollback);
+        }
+      } catch {
+        // Non-critical — terminal starts blank if scrollback is unavailable
+      }
 
       // Workaround for xterm.js CompositionHelper bug on WebKit (Tauri/WKWebView):
       // The hidden textarea accumulates text across compositions, but CompositionHelper

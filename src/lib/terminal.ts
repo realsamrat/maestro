@@ -26,9 +26,55 @@ export async function savePastedImage(data: number[], mediaType: string): Promis
   return invoke<string>("save_pasted_image", { data, mediaType });
 }
 
+/**
+ * Enhances a pipeline task prompt using the local `claude` CLI in print mode.
+ * Uses the user's existing Claude Code subscription — no API key required.
+ * @param prompt - The raw prompt text to improve
+ * @param cwd - Optional working directory for project context
+ */
+export async function enhancePromptWithClaude(
+  prompt: string,
+  cwd?: string
+): Promise<string> {
+  return invoke<string>("enhance_prompt_with_claude", { prompt, cwd: cwd ?? null });
+}
+
 /** Writes raw bytes to the PTY stdin of the given session. */
 export async function writeStdin(sessionId: number, data: string): Promise<void> {
   return invoke("write_stdin", { sessionId, data });
+}
+
+/**
+ * Sends a (possibly multi-line) prompt to an interactive Claude Code session and submits it.
+ *
+ * Rules that are known to work from testing:
+ *  - `\r` as a *separate* writeStdin call (with a small delay) submits — matching
+ *    how SessionControlRow.sendToSession works.
+ *  - Embedding `\n` or `\x1b[13;2u` inside a larger text buffer causes either early
+ *    submits or cut-off text because Claude Code processes them mid-stream.
+ *
+ * Solution: split the prompt on newlines and send each line as its own writeStdin
+ * call, followed immediately by an isolated `\x1b[13;2u` (Shift+Enter) write.
+ * This mirrors exactly what happens when the user presses Shift+Enter in xterm.js —
+ * the escape sequence arrives as a standalone write, never embedded mid-text.
+ * After all lines are buffered, a final `\r` (50 ms later) submits the whole prompt.
+ */
+export async function sendPromptToSession(sessionId: number, text: string): Promise<void> {
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (lines[i]) await writeStdin(sessionId, lines[i]);
+    // Isolated Shift+Enter: inserts a newline in Claude Code's input buffer without submitting.
+    await writeStdin(sessionId, "\x1b[13;2u");
+    // 16 ms pause lets readline fully process the Shift+Enter escape sequence before
+    // the next line arrives. Without this, rapid back-to-back writes cause the PTY to
+    // buffer everything faster than readline can parse escape sequences, silently
+    // dropping lines (the symptom: only the last few lines of a long prompt are received).
+    await new Promise((r) => setTimeout(r, 16));
+  }
+  // Last line (may be empty string for trailing newlines — still safe to write)
+  await writeStdin(sessionId, lines[lines.length - 1] ?? "");
+  await new Promise((r) => setTimeout(r, 100));
+  await writeStdin(sessionId, "\r");
 }
 
 /** Notifies the backend PTY of a terminal dimension change (rows x cols). */
@@ -39,6 +85,15 @@ export async function resizePty(sessionId: number, rows: number, cols: number): 
 /** Terminates the backend PTY process and cleans up the session. */
 export async function killSession(sessionId: number): Promise<void> {
   return invoke("kill_session", { sessionId });
+}
+
+/**
+ * Returns buffered PTY output (scrollback history) for a session.
+ * Used on TerminalView mount to restore terminal history after a WebView reload.
+ * Returns an empty string if the session has no buffered output.
+ */
+export async function getSessionScrollback(sessionId: number): Promise<string> {
+  return invoke<string>("get_session_scrollback", { sessionId });
 }
 
 /** AI mode variants matching the backend enum. */

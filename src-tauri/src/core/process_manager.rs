@@ -14,6 +14,29 @@ use libc;
 
 use super::error::PtyError;
 
+// Maximum bytes kept in the per-session scrollback ring buffer (128 KB).
+const MAX_SCROLLBACK_BYTES: usize = 131_072;
+
+/// Appends `text` to the session scrollback ring buffer (trimming oldest bytes
+/// when the cap is exceeded), then emits the Tauri PTY output event.
+/// Centralising both operations avoids missing any emit point.
+fn emit_pty_batch(
+    app: &AppHandle,
+    event_name: &str,
+    text: String,
+    scrollback: &Arc<Mutex<Vec<u8>>>,
+) {
+    {
+        let mut sb = scrollback.lock().unwrap();
+        sb.extend_from_slice(text.as_bytes());
+        if sb.len() > MAX_SCROLLBACK_BYTES {
+            let excess = sb.len() - MAX_SCROLLBACK_BYTES;
+            sb.drain(..excess);
+        }
+    }
+    let _ = app.emit(event_name, text);
+}
+
 /// Stateful UTF-8 decoder that handles split multi-byte sequences.
 ///
 /// When reading from a PTY in 4096-byte chunks, a multi-byte UTF-8 character
@@ -93,6 +116,9 @@ struct PtySession {
     shutdown: Arc<Notify>,
     /// Handle to the dedicated reader OS thread.
     reader_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Rolling scrollback buffer: last MAX_SCROLLBACK_BYTES of decoded PTY output.
+    /// Written by the tokio batch-emit task; read on frontend reconnect.
+    scrollback: Arc<Mutex<Vec<u8>>>,
 }
 
 struct Inner {
@@ -277,6 +303,9 @@ impl ProcessManager {
             .try_clone_reader()
             .map_err(|e| PtyError::spawn_failed(format!("Failed to clone PTY reader: {e}")))?;
 
+        let scrollback: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let scrollback_task = Arc::clone(&scrollback);
+
         let shutdown = Arc::new(Notify::new());
         let shutdown_clone = shutdown.clone();
 
@@ -334,6 +363,7 @@ impl ProcessManager {
         let app = app_handle.clone();
         #[cfg(windows)]
         let inner_ref = self.inner.clone();
+        let scrollback_emit = scrollback_task; // move into tokio task
         tokio::spawn(async move {
             let mut decoder = Utf8Decoder::new();
             let mut batch_buf = String::new();
@@ -379,7 +409,7 @@ impl ProcessManager {
                                     }
                                     // Flush immediately if buffer exceeds safety valve
                                     if batch_buf.len() >= MAX_BATCH_BYTES {
-                                        let _ = app.emit(&event_name, std::mem::take(&mut batch_buf));
+                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                 }
                                 None => break, // Channel closed
@@ -426,13 +456,13 @@ impl ProcessManager {
                                     }
                                     // Flush immediately if buffer exceeds safety valve
                                     if batch_buf.len() >= MAX_BATCH_BYTES {
-                                        let _ = app.emit(&event_name, std::mem::take(&mut batch_buf));
+                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                 }
                                 None => {
                                     // Channel closed — flush remaining data and exit
                                     if !batch_buf.is_empty() {
-                                        let _ = app.emit(&event_name, std::mem::take(&mut batch_buf));
+                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                     break;
                                 }
@@ -441,13 +471,13 @@ impl ProcessManager {
                         _ = tokio::time::sleep(FLUSH_INTERVAL) => {
                             // Timer fired — flush accumulated data
                             if !batch_buf.is_empty() {
-                                let _ = app.emit(&event_name, std::mem::take(&mut batch_buf));
+                                emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                             }
                         }
                         _ = shutdown_clone.notified() => {
                             // Flush remaining data before shutdown
                             if !batch_buf.is_empty() {
-                                let _ = app.emit(&event_name, std::mem::take(&mut batch_buf));
+                                emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                             }
                             break;
                         }
@@ -457,7 +487,7 @@ impl ProcessManager {
 
             // Final flush for any remaining buffered data
             if !batch_buf.is_empty() {
-                let _ = app.emit(&event_name, batch_buf);
+                emit_pty_batch(&app, &event_name, batch_buf, &scrollback_emit);
             }
             log::debug!("PTY event emitter {id} exited");
         });
@@ -473,6 +503,7 @@ impl ProcessManager {
             pgid,
             shutdown,
             reader_handle: Mutex::new(Some(reader_handle)),
+            scrollback,
         };
 
         self.inner.sessions.insert(id, session);
@@ -683,4 +714,47 @@ impl ProcessManager {
 
         Ok(count)
     }
+
+    /// Returns the buffered scrollback for a session as a UTF-8 string.
+    /// Used by the frontend to restore terminal history after a WebView reload.
+    pub fn get_session_scrollback(&self, session_id: u32) -> Option<String> {
+        self.inner.sessions.get(&session_id).map(|s| {
+            String::from_utf8_lossy(&s.scrollback.lock().unwrap()).into_owned()
+        })
+    }
+
+    /// Kills only sessions whose child process is no longer alive, returning
+    /// their IDs so the caller can also clean up associated metadata stores.
+    ///
+    /// Unlike `kill_all_sessions`, live sessions are left untouched so the
+    /// frontend can reconnect to them after a WebView reload.
+    pub async fn cleanup_dead_sessions(&self) -> Vec<u32> {
+        let dead_ids: Vec<u32> = self
+            .inner
+            .sessions
+            .iter()
+            .filter(|entry| !is_pid_alive(entry.value().child_pid))
+            .map(|entry| *entry.key())
+            .collect();
+
+        for &id in &dead_ids {
+            if let Err(e) = self.kill_session(id).await {
+                log::warn!("cleanup_dead_sessions: failed to reap session {}: {}", id, e);
+            }
+        }
+
+        dead_ids
+    }
+}
+
+/// Returns true if the process with the given PID is still running.
+/// On Unix, sends signal 0 (existence check). On non-Unix, conservatively true.
+#[cfg(unix)]
+fn is_pid_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: i32) -> bool {
+    true
 }
