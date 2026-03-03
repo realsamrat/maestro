@@ -55,10 +55,50 @@ pub(crate) async fn prepare_worktree_inner(
     let repo_path = PathBuf::from(&project_path);
     let git = Git::new(&repo_path);
 
-    // Resolve branch: use provided branch, or auto-detect current HEAD branch
+    // Resolve branch: use provided branch, or auto-detect.
     let branch = match branch {
         Some(b) if !b.is_empty() => b,
         _ => {
+            // No branch specified — check for an existing Maestro-managed worktree
+            // first. Creating a worktree switches the main repo to a different branch,
+            // so a second "auto" session would detect that switched branch and land in a
+            // different worktree. By reusing an existing managed worktree we ensure all
+            // auto sessions for the same project end up in the same place.
+            let base = worktree_base_path
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(worktree_base_dir);
+            // Canonicalize so that symlinks (e.g. /var → /private/var on macOS)
+            // don't cause starts_with comparisons to fail.
+            let base = std::fs::canonicalize(&base).unwrap_or(base);
+
+            if let Ok(worktrees) = git.worktree_list().await {
+                for wt in &worktrees {
+                    if wt.is_main_worktree {
+                        continue;
+                    }
+                    // Only reuse worktrees under the Maestro-managed base directory
+                    let wt_canonical = std::fs::canonicalize(&wt.path)
+                        .unwrap_or_else(|_| PathBuf::from(&wt.path));
+                    if wt_canonical.starts_with(&base) {
+                        if let Some(ref wt_branch) = wt.branch {
+                            log::info!(
+                                "Auto-reusing managed worktree at {} for branch {}",
+                                wt.path,
+                                wt_branch
+                            );
+                            return Ok(WorktreePreparationResult {
+                                working_directory: wt.path.clone(),
+                                worktree_path: Some(wt.path.clone()),
+                                created: false,
+                                warning: None,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // No existing managed worktree — detect current HEAD branch
             match git.current_branch().await {
                 Ok(b) => b,
                 Err(_) => {
@@ -475,6 +515,58 @@ mod tests {
 
         // Cleanup
         let wt_path = PathBuf::from(result.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_prepare_second_session_reuses_existing_managed_worktree() {
+        // Simulate the second-session scenario:
+        // Session 1 creates a worktree (switching main repo to a different branch).
+        // Session 2 (no branch selected) must reuse the same worktree, not create a new one.
+        let (_dir, path) = create_test_repo().await;
+        let git = Git::new(&path);
+
+        // Create a second branch so session 1 can switch away from main
+        create_branch(&git, "fallback").await;
+
+        let wm = WorktreeManager::new();
+        let base_path = tempdir().unwrap();
+        let base_str = base_path.path().to_string_lossy().to_string();
+
+        // Session 1: no branch → creates worktree for current branch (main)
+        let result1 = prepare_worktree_inner(
+            &wm,
+            path.to_string_lossy().to_string(),
+            None,
+            Some(base_str.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(result1.created, "Session 1 should create a new worktree");
+
+        // Session 2: no branch → must reuse session 1's worktree
+        let result2 = prepare_worktree_inner(
+            &wm,
+            path.to_string_lossy().to_string(),
+            None,
+            Some(base_str.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(!result2.created, "Session 2 should reuse, not create");
+        // Canonicalize both paths before comparing — on macOS /var is a symlink to
+        // /private/var, so the worktree creator and git worktree list may disagree.
+        let canonical1 = std::fs::canonicalize(&result1.working_directory)
+            .unwrap_or_else(|_| PathBuf::from(&result1.working_directory));
+        let canonical2 = std::fs::canonicalize(&result2.working_directory)
+            .unwrap_or_else(|_| PathBuf::from(&result2.working_directory));
+        assert_eq!(
+            canonical2, canonical1,
+            "Session 2 must land in the same worktree as session 1"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result1.worktree_path.unwrap());
         let _ = wm.remove(&path, &wt_path).await;
     }
 
