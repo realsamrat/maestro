@@ -22,7 +22,8 @@ pub struct WorktreePreparationResult {
 /// Prepares a worktree for a session, handling all edge cases gracefully.
 ///
 /// This command orchestrates worktree creation for a session launch:
-/// 1. If no branch is specified, returns the project path as-is.
+/// 1. If no branch is specified, auto-detects the current HEAD branch.
+///    Falls back to project path if not a git repo or HEAD is detached.
 /// 2. If a **managed** worktree already exists for this branch, reuses it.
 /// 3. If the branch is checked out in the main repo, switches main to a fallback first.
 /// 4. If the branch doesn't exist locally, creates it (handling remote branches).
@@ -50,21 +51,28 @@ pub(crate) async fn prepare_worktree_inner(
     branch: Option<String>,
     worktree_base_path: Option<String>,
 ) -> Result<WorktreePreparationResult, String> {
-    // No branch specified - just use the project path
+    // Build git object first so we can call current_branch() for auto-detection
+    let repo_path = PathBuf::from(&project_path);
+    let git = Git::new(&repo_path);
+
+    // Resolve branch: use provided branch, or auto-detect current HEAD branch
     let branch = match branch {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return Ok(WorktreePreparationResult {
-                working_directory: project_path,
-                worktree_path: None,
-                created: false,
-                warning: None,
-            });
+            match git.current_branch().await {
+                Ok(b) => b,
+                Err(_) => {
+                    // Detached HEAD or not a git repo — fall back to project path
+                    return Ok(WorktreePreparationResult {
+                        working_directory: project_path,
+                        worktree_path: None,
+                        created: false,
+                        warning: None,
+                    });
+                }
+            }
         }
     };
-
-    let repo_path = PathBuf::from(&project_path);
-    let git = Git::new(&repo_path);
 
     // Fetch branches early so we can correctly resolve local branch names
     // (e.g., distinguish "feature/foo" local branch from "origin/feature-x" remote ref).
@@ -422,21 +430,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_no_branch_returns_project_path() {
+    async fn test_prepare_no_branch_auto_detects_and_creates_worktree() {
         let (_dir, path) = create_test_repo().await;
         let wm = WorktreeManager::new();
         let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
             .await
             .unwrap();
 
-        assert_eq!(result.working_directory, path.to_string_lossy().to_string());
-        assert!(result.worktree_path.is_none());
-        assert!(!result.created);
-        assert!(result.warning.is_none());
+        // Auto-detects current HEAD branch and creates a worktree
+        assert!(result.created, "Should have created a worktree via auto-detection");
+        assert!(result.worktree_path.is_some(), "Should have a worktree path");
+        assert_ne!(
+            result.working_directory,
+            path.to_string_lossy().to_string(),
+            "Working directory should be the worktree, not the main repo"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
     }
 
     #[tokio::test]
-    async fn test_prepare_empty_branch_returns_project_path() {
+    async fn test_prepare_empty_branch_auto_detects_and_creates_worktree() {
         let (_dir, path) = create_test_repo().await;
         let wm = WorktreeManager::new();
         let result = prepare_worktree_inner(
@@ -448,9 +464,35 @@ mod tests {
         .await
         .unwrap();
 
+        // Empty string treated same as None — auto-detects and creates worktree
+        assert!(result.created, "Should have created a worktree via auto-detection");
+        assert!(result.worktree_path.is_some(), "Should have a worktree path");
+        assert_ne!(
+            result.working_directory,
+            path.to_string_lossy().to_string(),
+            "Working directory should be the worktree, not the main repo"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_prepare_no_branch_non_git_repo_falls_back() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // NOT a git repo — current_branch() will fail → fall back gracefully
+
+        let wm = WorktreeManager::new();
+        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+
         assert_eq!(result.working_directory, path.to_string_lossy().to_string());
         assert!(result.worktree_path.is_none());
         assert!(!result.created);
+        assert!(result.warning.is_none());
     }
 
     #[tokio::test]
