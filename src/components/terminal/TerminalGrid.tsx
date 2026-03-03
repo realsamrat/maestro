@@ -503,14 +503,14 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       let worktreePath: string | null = null;
       let worktreeWarning: string | null = null;
 
-      if (effectiveRepoPath && slot.branch) {
-        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch, worktreeBasePath);
+      if (effectiveRepoPath) {
+        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch ?? null, worktreeBasePath);
         workingDirectory = result.working_directory;
         worktreePath = result.worktree_path;
         worktreeWarning = result.warning;
 
         if (worktreeWarning) {
-          console.error(`[Worktree] Warning for branch "${slot.branch}": ${worktreeWarning}`);
+          console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
         }
       }
 
