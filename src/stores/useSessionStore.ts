@@ -145,18 +145,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   addSession: (session: SessionConfig) => {
-    // Clear any stale buffered status for this session ID across ALL projects
-    // This prevents pollution from old sessions with the same ID
+    // Read the buffered status FIRST, before the cleanup loop can delete it
+    const bufferKey = statusBufferKey(session.id, session.project_path);
+    const bufferedStatus = pendingStatusUpdates.get(bufferKey);
+
+    // Clear stale buffered status for OTHER keys with this session ID (different projects)
     for (const key of pendingStatusUpdates.keys()) {
-      if (key.startsWith(`${session.id}:`)) {
+      if (key.startsWith(`${session.id}:`) && key !== bufferKey) {
         console.log(`[SessionStore] Clearing stale buffered status for key: '${key}'`);
         pendingStatusUpdates.delete(key);
       }
     }
-
-    // Check if we have a buffered status update for this session
-    const bufferKey = statusBufferKey(session.id, session.project_path);
-    const bufferedStatus = pendingStatusUpdates.get(bufferKey);
 
     console.log(`[SessionStore] addSession id=${session.id} project_path='${session.project_path}'`);
     console.log(`[SessionStore] Buffer key: '${bufferKey}', has buffered status: ${!!bufferedStatus}`);
@@ -258,7 +257,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   getSessionsByProject: (projectPath: string) => {
-    return get().sessions.filter((s) => s.project_path === projectPath);
+    const normalize = (p: string) => p.replace(/^\/private\//, "/").replace(/\/$/, "");
+    return get().sessions.filter((s) => normalize(s.project_path) === normalize(projectPath));
   },
 
   initListeners: async () => {

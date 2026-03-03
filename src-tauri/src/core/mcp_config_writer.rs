@@ -615,9 +615,29 @@ pub async fn remove_session_mcp_config(working_dir: &Path, session_id: u32) -> R
         .map_err(|e| format!("Failed to parse .mcp.json: {}", e))?;
 
     if let Some(servers) = config.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
-        // Remove the single maestro-status entry
-        if servers.remove("maestro-status").is_some() {
-            log::debug!("Removed maestro-status MCP config from {:?} (session {})", mcp_path, session_id);
+        // Only remove the maestro-status entry if it belongs to THIS session.
+        // If another session (e.g. a sibling session in the same project) wrote
+        // its own maestro-status entry after this one was created, removing it
+        // would break that session's MCP status reporting.
+        let owned_by_this_session = servers
+            .get("maestro-status")
+            .and_then(|s| s.get("env"))
+            .and_then(|e| e.get("MAESTRO_SESSION_ID"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|id| id == session_id)
+            .unwrap_or(true); // if we can't read the ID, remove it to avoid stale entries
+
+        if owned_by_this_session {
+            if servers.remove("maestro-status").is_some() {
+                log::debug!("Removed maestro-status MCP config from {:?} (session {})", mcp_path, session_id);
+            }
+        } else {
+            log::debug!(
+                "Skipping maestro-status removal from {:?} — entry belongs to a different session (killing session {})",
+                mcp_path,
+                session_id
+            );
         }
 
         // Also clean up any legacy per-session entries that might exist

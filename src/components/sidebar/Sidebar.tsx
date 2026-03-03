@@ -56,6 +56,14 @@ import type { McpCustomServer } from "@/lib/mcp";
 import { checkClaudeMd, type ClaudeMdStatus } from "@/lib/claudemd";
 import { OpenCodeIcon } from "@/components/icons/OpenCodeIcon";
 
+/**
+ * Normalize macOS /private/ symlink so canonical (Rust) and dialog paths compare equal.
+ * `std::fs::canonicalize` resolves /Users → /private/Users on macOS.
+ */
+function normalizePath(p: string): string {
+  return p.replace(/^\/private\//, "/").replace(/\/$/, "");
+}
+
 type SidebarTab = "config" | "processes";
 
 interface SidebarProps {
@@ -601,7 +609,7 @@ function SessionsSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
 
   // Clicking a session row ensures the terminal grid is visible
   const handleSessionClick = () => {
@@ -685,7 +693,7 @@ function StatusSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only count those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
   const counts = sessions.reduce(
     (acc, session) => {
       acc.status[session.status] = (acc.status[session.status] ?? 0) + 1;
@@ -1497,7 +1505,7 @@ function AgentSessionsSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
 
   return (
     <div className={cardClass}>
@@ -1549,7 +1557,7 @@ function ProcessTreeSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const projectSessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const projectSessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
   const projectSessionIds = new Set(projectSessions.map((s) => s.id));
 
   // Filter trees to only show those for the active project's sessions
