@@ -32,11 +32,16 @@ import type { PluginConfig, SkillConfig } from "@/lib/plugins";
 import type { AiMode } from "@/stores/useSessionStore";
 import type { RepositoryInfo, WorkspaceType } from "@/stores/useWorkspaceStore";
 
+/** Controls how a session's working directory is resolved at launch. */
+export type WorktreeMode = "auto" | "project" | "new";
+
 /** Pre-launch session slot configuration. */
 export interface SessionSlot {
   id: string;
   mode: AiMode;
   branch: string | null;
+  /** How the working directory is resolved: auto-detect/reuse, project path, or new worktree. */
+  worktreeMode: WorktreeMode;
   sessionId: number | null;
   /** Path to the worktree if one was created for this session. */
   worktreePath: string | null;
@@ -72,6 +77,9 @@ interface PreLaunchCardProps {
   onCreateBranch?: (name: string, andCheckout: boolean, repoPath?: string) => Promise<void>;
   onModeChange: (mode: AiMode) => void;
   onBranchChange: (branch: string | null) => void;
+  onWorktreeModeChange: (mode: WorktreeMode) => void;
+  /** Whether a managed worktree exists for the current project. Disables "Current Worktree" if false. */
+  hasManagedWorktree?: boolean;
   /** Called when the branch dropdown is opened, to refresh the branch list. */
   onRefreshBranches?: () => void;
   onMcpToggle: (serverName: string) => void;
@@ -133,6 +141,8 @@ export function PreLaunchCard({
   onCreateBranch,
   onModeChange,
   onBranchChange,
+  onWorktreeModeChange,
+  hasManagedWorktree = false,
   onRefreshBranches,
   onMcpToggle,
   onSkillToggle,
@@ -1064,6 +1074,44 @@ export function PreLaunchCard({
             </>
           )}
         </div>
+
+        {/* Worktree Mode Selector — only shown for git repos */}
+        {isGitRepo && (
+          <div>
+            <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-maestro-muted">
+              Working Directory
+            </label>
+            <div className="flex gap-1">
+              {(["auto", "project", "new"] as WorktreeMode[]).map((m) => {
+                const labels: Record<WorktreeMode, string> = {
+                  auto: "Current Worktree",
+                  project: "Original Path",
+                  new: "New Worktree",
+                };
+                const isActive = slot.worktreeMode === m;
+                const isDisabled = m === "auto" && !hasManagedWorktree;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => !isDisabled && onWorktreeModeChange(m)}
+                    title={isDisabled ? "No managed worktree exists for this project" : undefined}
+                    className={`flex-1 rounded px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                      isDisabled
+                        ? "bg-maestro-card border border-maestro-border text-maestro-muted opacity-40 cursor-not-allowed"
+                        : isActive
+                          ? "bg-maestro-accent text-white"
+                          : "bg-maestro-card border border-maestro-border text-maestro-muted hover:text-maestro-text hover:border-maestro-accent/50"
+                    }`}
+                  >
+                    {labels[m]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* MCP Servers Selector — only Claude and OpenCode support MCP */}
         {(slot.mode === "Claude" || slot.mode === "OpenCode") && <div className="relative" ref={mcpDropdownRef}>
