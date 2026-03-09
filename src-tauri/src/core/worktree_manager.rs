@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::git::{Git, GitError, WorktreeInfo};
 
@@ -146,7 +147,16 @@ impl WorktreeManager {
     ) -> Result<PathBuf, GitError> {
         let git = Git::new(repo_path);
 
-        let wt_path = self.worktree_path_with_base(repo_path, branch, base_override).await;
+        // force_new: generate a unique random path so parallel sessions each get
+        // their own independent worktree rather than colliding with the deterministic one.
+        let wt_path = if force_new {
+            let name = project_name(repo_path);
+            let rand_suffix = &Uuid::new_v4().to_string().replace('-', "")[..8];
+            let worktree_name = format!("moist-{}", rand_suffix);
+            effective_base_dir(base_override).join(name).join(worktree_name)
+        } else {
+            self.worktree_path_with_base(repo_path, branch, base_override).await
+        };
 
         // Guard against duplicate branch in non-main worktrees unless force_new.
         if !force_new {
@@ -163,28 +173,6 @@ impl WorktreeManager {
                         });
                     }
                 }
-            }
-        } else {
-            // force_new: tear down any existing worktree at this path (git-registered or not)
-            // so git worktree add always gets a clean, non-existent target directory.
-            if let Ok(existing) = git.worktree_list().await {
-                for wt in &existing {
-                    if wt.is_main_worktree {
-                        continue;
-                    }
-                    if Path::new(&wt.path) == wt_path {
-                        log::info!("force_new: unregistering existing worktree at {}", wt.path);
-                        let _ = git.worktree_remove(Path::new(&wt.path), true).await;
-                        let _ = git.worktree_prune().await;
-                        break;
-                    }
-                }
-            }
-            // Remove the directory regardless of whether git knew about it —
-            // git worktree add fails if the target path already exists on disk.
-            if wt_path.exists() {
-                log::info!("force_new: removing leftover directory at {}", wt_path.display());
-                let _ = tokio::fs::remove_dir_all(&wt_path).await;
             }
         }
 
