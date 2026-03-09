@@ -31,7 +31,8 @@ import {
 import { checkFullDiskAccess, pathRequiresFDA } from "@/lib/permissions";
 import { useFDAStore } from "@/stores/useFDAStore";
 import { useCliSettingsStore } from "@/stores/useCliSettingsStore";
-import { prepareSessionWorktree } from "@/lib/worktreeManager";
+import { cleanupSessionWorktree, prepareSessionWorktree } from "@/lib/worktreeManager";
+import { useWorktreeSettingsStore } from "@/stores/useWorktreeSettingsStore";
 import { useTerminalKeyboard } from "@/hooks/useTerminalKeyboard";
 import { useMcpStore } from "@/stores/useMcpStore";
 import { usePluginStore } from "@/stores/usePluginStore";
@@ -804,10 +805,27 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       removeSessionHooksConfig(workingDir).catch(console.error);
     }
 
-    // Worktrees are kept alive after session close so work-in-progress is preserved.
-    // The next "Current Worktree" launch will reuse the existing directory.
+    // Handle worktree cleanup based on user preference
     if (effectiveRepoPath && worktreePath) {
-      refreshBranches();
+      const closeAction = useWorktreeSettingsStore.getState().worktreeCloseAction;
+      if (closeAction === "delete") {
+        cleanupSessionWorktree(effectiveRepoPath, worktreePath)
+          .then(() => refreshBranches())
+          .catch(console.error);
+      } else if (closeAction === "ask") {
+        ask("Delete the worktree for this session?\n\nThis will remove the working directory and any uncommitted changes.", {
+          title: "Delete Worktree?",
+          kind: "warning",
+        }).then((shouldDelete) => {
+          if (shouldDelete) {
+            cleanupSessionWorktree(effectiveRepoPath, worktreePath).catch(console.error);
+          }
+          refreshBranches();
+        }).catch(() => {});
+      } else {
+        // keep (default)
+        refreshBranches();
+      }
     }
   }, [tabId, effectiveRepoPath, projectPath, removeSessionFromProject, refreshBranches, focusedSlotId, layoutTree]);
 

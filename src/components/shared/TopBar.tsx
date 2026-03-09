@@ -8,9 +8,11 @@ import {
   Network,
   PanelLeft,
   Square,
+  Zap,
   X,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
+import { ActionsModal } from "@/components/git/ActionsModal";
 import { isMac } from "@/lib/platform";
 import { useGitStore } from "../../stores/useGitStore";
 import { useSessionStore } from "../../stores/useSessionStore";
@@ -47,6 +49,7 @@ export function TopBar({
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
   const [isSwitching, setIsSwitching] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
 
   const { checkoutBranch, createBranch, fetchCurrentBranch } = useGitStore();
 
@@ -171,6 +174,17 @@ export function TopBar({
 
       {/* Right: action icons */}
       <div className="flex items-center gap-0.5 mr-1">
+        {repoPath && branchName && (
+          <button
+            type="button"
+            onClick={() => setActionsOpen(true)}
+            className="rounded p-1.5 transition-colors text-maestro-muted hover:bg-maestro-card hover:text-maestro-text"
+            aria-label="Git Actions"
+            title="Git Actions"
+          >
+            <Zap size={14} />
+          </button>
+        )}
         <button
           type="button"
           onClick={onToggleOrchestrator}
@@ -198,6 +212,14 @@ export function TopBar({
           <GitMerge size={14} />
         </button>
       </div>
+
+      {actionsOpen && repoPath && branchName && (
+        <ActionsModal
+          repoPath={repoPath}
+          currentBranch={branchName}
+          onClose={() => setActionsOpen(false)}
+        />
+      )}
 
       {/* Window controls - hidden on macOS (custom traffic lights in row) or when hideWindowControls */}
       {!hideWindowControls && !isMac() && (

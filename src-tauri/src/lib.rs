@@ -212,6 +212,11 @@ pub fn run() {
             commands::git::is_git_repository,
             commands::git::is_git_worktree,
             commands::git::detect_repositories,
+            commands::git::git_status,
+            commands::git::git_stage_all,
+            commands::git::git_commit,
+            commands::git::git_push,
+            commands::git::git_pull,
             // Session commands (new)
             commands::session::get_sessions,
             commands::session::create_session,

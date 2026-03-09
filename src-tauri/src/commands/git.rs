@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::git::{BranchInfo, CommitInfo, FileChange, Git, GitError, GitUserConfig, RemoteInfo, WorktreeInfo};
+use crate::git::{BranchInfo, CommitInfo, FileChange, Git, GitError, GitUserConfig, RemoteInfo, StatusEntry, WorktreeInfo};
 
 /// Information about a detected git repository within a workspace.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -379,4 +379,45 @@ fn detect_repos_recursive<'a>(
             detect_repos_recursive(&path, repos, skip_dirs, depth + 1, max_depth).await;
         }
     })
+}
+
+/// Returns the working tree and index status of the repository.
+#[tauri::command]
+pub async fn git_status(repo_path: String) -> Result<Vec<StatusEntry>, GitError> {
+    validate_repo_path(&repo_path)?;
+    let git = Git::new(&repo_path);
+    git.status().await
+}
+
+/// Stages all changes (`git add .`).
+#[tauri::command]
+pub async fn git_stage_all(repo_path: String) -> Result<(), GitError> {
+    validate_repo_path(&repo_path)?;
+    let git = Git::new(&repo_path);
+    git.stage_all().await
+}
+
+/// Creates a commit with the given message. Returns the short hash.
+#[tauri::command]
+pub async fn git_commit(repo_path: String, message: String) -> Result<String, GitError> {
+    validate_repo_path(&repo_path)?;
+    let git = Git::new(&repo_path);
+    git.commit(&message).await
+}
+
+/// Pushes current branch to the remote. Uses `--set-upstream` when no tracking branch exists.
+#[tauri::command]
+pub async fn git_push(repo_path: String, remote: Option<String>, branch: Option<String>) -> Result<(), GitError> {
+    validate_repo_path(&repo_path)?;
+    let git = Git::new(&repo_path);
+    let has_upstream = git.has_upstream().await.unwrap_or(false);
+    git.push(remote.as_deref(), branch.as_deref(), !has_upstream).await
+}
+
+/// Pulls from the remote.
+#[tauri::command]
+pub async fn git_pull(repo_path: String, remote: Option<String>, branch: Option<String>) -> Result<(), GitError> {
+    validate_repo_path(&repo_path)?;
+    let git = Git::new(&repo_path);
+    git.pull(remote.as_deref(), branch.as_deref()).await
 }
