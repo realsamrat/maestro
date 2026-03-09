@@ -342,12 +342,14 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
       onRehydrateStorage: () => {
         return (state) => {
           if (state) {
-            // Clear stale sessionIds - sessions don't survive app restarts
-            // This prevents session ID collision between persisted tabs and new sessions
+            // Clear stale sessionIds - PTY processes don't survive app restarts.
+            // Keep sessionsLaunched as-is: if the user had the grid open before
+            // closing, they'll see the grid again on restart (with a fresh empty
+            // slot ready to launch) rather than having to navigate through the
+            // landing page again.
             state.tabs = state.tabs.map((t) => ({
               ...t,
               sessionIds: [],
-              sessionsLaunched: false,
             }));
           }
         };

@@ -503,14 +503,14 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       let worktreePath: string | null = null;
       let worktreeWarning: string | null = null;
 
-      if (effectiveRepoPath && slot.branch) {
-        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch, worktreeBasePath);
+      if (effectiveRepoPath) {
+        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch ?? null, worktreeBasePath);
         workingDirectory = result.working_directory;
         worktreePath = result.worktree_path;
         worktreeWarning = result.warning;
 
         if (worktreeWarning) {
-          console.error(`[Worktree] Warning for branch "${slot.branch}": ${worktreeWarning}`);
+          console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
         }
       }
 
@@ -539,13 +539,17 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         });
       }
 
-      // Assign the branch to the session so the header displays it
+      // Assign the branch to the session so the header displays it.
       if (slot.branch) {
         const updatedConfig = await assignSessionBranch(sessionId, slot.branch, worktreePath);
         useSessionStore.getState().updateSession(sessionId, {
           branch: updatedConfig.branch,
           worktree_path: updatedConfig.worktree_path,
         });
+      } else if (worktreePath) {
+        // No branch explicitly selected, but a worktree was auto-prepared.
+        // Save the worktree path so the UI shows the correct working directory.
+        useSessionStore.getState().updateSession(sessionId, { worktree_path: worktreePath });
       }
 
       // Save enabled MCP servers for this session
@@ -686,7 +690,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       console.error("Failed to spawn shell:", err);
       setError("Failed to start terminal session");
     }
-  }, [projectPath, effectiveRepoPath, tabId, addSessionToProject]);
+  }, [projectPath, effectiveRepoPath, worktreeBasePath, tabId, addSessionToProject]);
 
   /**
    * Launches a single slot by spawning a shell with the configured settings.
@@ -1208,6 +1212,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
                 onCreateBranch={handleCreateBranch}
                 onModeChange={(mode) => updateSlotMode(zoomedSlot.id, mode)}
                 onBranchChange={(branch) => updateSlotBranch(zoomedSlot.id, branch)}
+                onRefreshBranches={refreshBranches}
                 onMcpToggle={(serverName) => toggleSlotMcp(zoomedSlot.id, serverName)}
                 onSkillToggle={(skillId) => toggleSlotSkill(zoomedSlot.id, skillId)}
                 onPluginToggle={(pluginId) => toggleSlotPlugin(zoomedSlot.id, pluginId)}
@@ -1266,6 +1271,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         onCreateBranch={handleCreateBranch}
         onModeChange={(mode) => updateSlotMode(slot.id, mode)}
         onBranchChange={(branch) => updateSlotBranch(slot.id, branch)}
+        onRefreshBranches={refreshBranches}
         onMcpToggle={(serverName) => toggleSlotMcp(slot.id, serverName)}
         onSkillToggle={(skillId) => toggleSlotSkill(slot.id, skillId)}
         onPluginToggle={(pluginId) => toggleSlotPlugin(slot.id, pluginId)}
@@ -1280,7 +1286,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       />
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps -- Deps cover all render-affecting state
-  }, [slots, focusedSlotId, isActive, getFocusCallback, handleKill, handleToggleZoom, projectPath, branches, isLoadingBranches, isGitRepo, repositories, workspaceType, effectiveRepoPath, onRepoChange, mcpServers, skills, plugins, handleCreateBranch, updateSlotMode, updateSlotBranch, toggleSlotMcp, toggleSlotSkill, toggleSlotPlugin, selectAllMcp, unselectAllMcp, selectAllPlugins, unselectAllPlugins, launchSlot, removeSlot]);
+  }, [slots, focusedSlotId, isActive, getFocusCallback, handleKill, handleToggleZoom, projectPath, branches, isLoadingBranches, isGitRepo, repositories, workspaceType, effectiveRepoPath, onRepoChange, mcpServers, skills, plugins, handleCreateBranch, updateSlotMode, updateSlotBranch, refreshBranches, toggleSlotMcp, toggleSlotSkill, toggleSlotPlugin, selectAllMcp, unselectAllMcp, selectAllPlugins, unselectAllPlugins, launchSlot, removeSlot]);
 
   const handleRatioChange = useCallback((nodeId: string, ratio: number) => {
     setLayoutTree((prev) => updateRatio(prev, nodeId, ratio));

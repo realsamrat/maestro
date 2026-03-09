@@ -22,7 +22,8 @@ pub struct WorktreePreparationResult {
 /// Prepares a worktree for a session, handling all edge cases gracefully.
 ///
 /// This command orchestrates worktree creation for a session launch:
-/// 1. If no branch is specified, returns the project path as-is.
+/// 1. If no branch is specified, auto-detects the current HEAD branch.
+///    Falls back to project path if not a git repo or HEAD is detached.
 /// 2. If a **managed** worktree already exists for this branch, reuses it.
 /// 3. If the branch is checked out in the main repo, switches main to a fallback first.
 /// 4. If the branch doesn't exist locally, creates it (handling remote branches).
@@ -50,21 +51,68 @@ pub(crate) async fn prepare_worktree_inner(
     branch: Option<String>,
     worktree_base_path: Option<String>,
 ) -> Result<WorktreePreparationResult, String> {
-    // No branch specified - just use the project path
+    // Build git object first so we can call current_branch() for auto-detection
+    let repo_path = PathBuf::from(&project_path);
+    let git = Git::new(&repo_path);
+
+    // Resolve branch: use provided branch, or auto-detect.
     let branch = match branch {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return Ok(WorktreePreparationResult {
-                working_directory: project_path,
-                worktree_path: None,
-                created: false,
-                warning: None,
-            });
+            // No branch specified — check for an existing Maestro-managed worktree
+            // first. Creating a worktree switches the main repo to a different branch,
+            // so a second "auto" session would detect that switched branch and land in a
+            // different worktree. By reusing an existing managed worktree we ensure all
+            // auto sessions for the same project end up in the same place.
+            let base = worktree_base_path
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(worktree_base_dir);
+            // Canonicalize so that symlinks (e.g. /var → /private/var on macOS)
+            // don't cause starts_with comparisons to fail.
+            let base = std::fs::canonicalize(&base).unwrap_or(base);
+
+            if let Ok(worktrees) = git.worktree_list().await {
+                for wt in &worktrees {
+                    if wt.is_main_worktree {
+                        continue;
+                    }
+                    // Only reuse worktrees under the Maestro-managed base directory
+                    let wt_canonical = std::fs::canonicalize(&wt.path)
+                        .unwrap_or_else(|_| PathBuf::from(&wt.path));
+                    if wt_canonical.starts_with(&base) {
+                        if let Some(ref wt_branch) = wt.branch {
+                            log::info!(
+                                "Auto-reusing managed worktree at {} for branch {}",
+                                wt.path,
+                                wt_branch
+                            );
+                            return Ok(WorktreePreparationResult {
+                                working_directory: wt.path.clone(),
+                                worktree_path: Some(wt.path.clone()),
+                                created: false,
+                                warning: None,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // No existing managed worktree — detect current HEAD branch
+            match git.current_branch().await {
+                Ok(b) => b,
+                Err(_) => {
+                    // Detached HEAD or not a git repo — fall back to project path
+                    return Ok(WorktreePreparationResult {
+                        working_directory: project_path,
+                        worktree_path: None,
+                        created: false,
+                        warning: None,
+                    });
+                }
+            }
         }
     };
-
-    let repo_path = PathBuf::from(&project_path);
-    let git = Git::new(&repo_path);
 
     // Fetch branches early so we can correctly resolve local branch names
     // (e.g., distinguish "feature/foo" local branch from "origin/feature-x" remote ref).
@@ -123,30 +171,47 @@ pub(crate) async fn prepare_worktree_inner(
                 match git.checkout_branch(&fallback).await {
                     Ok(()) => {
                         log::info!("Switched main repo to {}", fallback);
+                        true
                     }
                     Err(e) => {
-                        log::warn!("Failed to switch main repo to {}: {}", fallback, e);
-                        warning = Some(format!(
-                            "Could not switch main repo from {}: {}",
-                            local_branch, e
-                        ));
+                        // Can't switch — uncommitted changes or merge conflict.
+                        // git worktree add would also fail, so bail out early.
+                        log::warn!(
+                            "Cannot create worktree for {}: failed to switch main repo to {}: {}",
+                            local_branch, fallback, e
+                        );
+                        return Ok(WorktreePreparationResult {
+                            working_directory: project_path,
+                            worktree_path: None,
+                            created: false,
+                            warning: Some(format!(
+                                "Could not switch main repo from {} to {}: {}",
+                                local_branch, fallback, e
+                            )),
+                        });
                     }
                 }
             }
             None => {
-                // No other branches exist - detach HEAD to free the branch
+                // No other branches exist - try to detach HEAD to free the branch
                 log::info!("No fallback branch available, detaching HEAD");
                 match git.detach_head().await {
                     Ok(()) => {
                         log::info!("Detached HEAD in main repo");
+                        true
                     }
                     Err(e) => {
-                        log::warn!("Failed to detach HEAD: {}", e);
-                        warning = Some(format!("Could not detach HEAD: {}", e));
+                        log::warn!("Cannot create worktree for {}: failed to detach HEAD: {}", local_branch, e);
+                        return Ok(WorktreePreparationResult {
+                            working_directory: project_path,
+                            worktree_path: None,
+                            created: false,
+                            warning: Some(format!("Could not detach HEAD: {}", e)),
+                        });
                     }
                 }
             }
-        }
+        };
     }
 
     // Ensure the branch exists locally, handling remote branches correctly
@@ -422,21 +487,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_no_branch_returns_project_path() {
+    async fn test_prepare_no_branch_auto_detects_and_creates_worktree() {
         let (_dir, path) = create_test_repo().await;
         let wm = WorktreeManager::new();
         let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
             .await
             .unwrap();
 
-        assert_eq!(result.working_directory, path.to_string_lossy().to_string());
-        assert!(result.worktree_path.is_none());
-        assert!(!result.created);
-        assert!(result.warning.is_none());
+        // Auto-detects current HEAD branch and creates a worktree
+        assert!(result.created, "Should have created a worktree via auto-detection");
+        assert!(result.worktree_path.is_some(), "Should have a worktree path");
+        assert_ne!(
+            result.working_directory,
+            path.to_string_lossy().to_string(),
+            "Working directory should be the worktree, not the main repo"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
     }
 
     #[tokio::test]
-    async fn test_prepare_empty_branch_returns_project_path() {
+    async fn test_prepare_empty_branch_auto_detects_and_creates_worktree() {
         let (_dir, path) = create_test_repo().await;
         let wm = WorktreeManager::new();
         let result = prepare_worktree_inner(
@@ -448,9 +521,87 @@ mod tests {
         .await
         .unwrap();
 
+        // Empty string treated same as None — auto-detects and creates worktree
+        assert!(result.created, "Should have created a worktree via auto-detection");
+        assert!(result.worktree_path.is_some(), "Should have a worktree path");
+        assert_ne!(
+            result.working_directory,
+            path.to_string_lossy().to_string(),
+            "Working directory should be the worktree, not the main repo"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_prepare_second_session_reuses_existing_managed_worktree() {
+        // Simulate the second-session scenario:
+        // Session 1 creates a worktree (switching main repo to a different branch).
+        // Session 2 (no branch selected) must reuse the same worktree, not create a new one.
+        let (_dir, path) = create_test_repo().await;
+        let git = Git::new(&path);
+
+        // Create a second branch so session 1 can switch away from main
+        create_branch(&git, "fallback").await;
+
+        let wm = WorktreeManager::new();
+        let base_path = tempdir().unwrap();
+        let base_str = base_path.path().to_string_lossy().to_string();
+
+        // Session 1: no branch → creates worktree for current branch (main)
+        let result1 = prepare_worktree_inner(
+            &wm,
+            path.to_string_lossy().to_string(),
+            None,
+            Some(base_str.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(result1.created, "Session 1 should create a new worktree");
+
+        // Session 2: no branch → must reuse session 1's worktree
+        let result2 = prepare_worktree_inner(
+            &wm,
+            path.to_string_lossy().to_string(),
+            None,
+            Some(base_str.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(!result2.created, "Session 2 should reuse, not create");
+        // Canonicalize both paths before comparing — on macOS /var is a symlink to
+        // /private/var, so the worktree creator and git worktree list may disagree.
+        let canonical1 = std::fs::canonicalize(&result1.working_directory)
+            .unwrap_or_else(|_| PathBuf::from(&result1.working_directory));
+        let canonical2 = std::fs::canonicalize(&result2.working_directory)
+            .unwrap_or_else(|_| PathBuf::from(&result2.working_directory));
+        assert_eq!(
+            canonical2, canonical1,
+            "Session 2 must land in the same worktree as session 1"
+        );
+
+        // Cleanup
+        let wt_path = PathBuf::from(result1.worktree_path.unwrap());
+        let _ = wm.remove(&path, &wt_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_prepare_no_branch_non_git_repo_falls_back() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // NOT a git repo — current_branch() will fail → fall back gracefully
+
+        let wm = WorktreeManager::new();
+        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+
         assert_eq!(result.working_directory, path.to_string_lossy().to_string());
         assert!(result.worktree_path.is_none());
         assert!(!result.created);
+        assert!(result.warning.is_none());
     }
 
     #[tokio::test]
