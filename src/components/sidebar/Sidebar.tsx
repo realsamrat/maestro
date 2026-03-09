@@ -683,6 +683,7 @@ const MODE_ICON: Record<AiMode, React.ElementType> = {
   Gemini: Sparkles,
   Codex: Cpu,
   OpenCode: OpenCodeIcon,
+  Pi: Bot,
   Plain: Globe,
 };
 

@@ -539,13 +539,17 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         });
       }
 
-      // Assign the branch to the session so the header displays it
+      // Assign the branch to the session so the header displays it.
       if (slot.branch) {
         const updatedConfig = await assignSessionBranch(sessionId, slot.branch, worktreePath);
         useSessionStore.getState().updateSession(sessionId, {
           branch: updatedConfig.branch,
           worktree_path: updatedConfig.worktree_path,
         });
+      } else if (worktreePath) {
+        // No branch explicitly selected, but a worktree was auto-prepared.
+        // Save the worktree path so the UI shows the correct working directory.
+        useSessionStore.getState().updateSession(sessionId, { worktree_path: worktreePath });
       }
 
       // Save enabled MCP servers for this session

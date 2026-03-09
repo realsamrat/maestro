@@ -97,7 +97,7 @@ export async function getSessionScrollback(sessionId: number): Promise<string> {
 }
 
 /** AI mode variants matching the backend enum. */
-export type AiMode = "Claude" | "Gemini" | "Codex" | "OpenCode" | "Plain";
+export type AiMode = "Claude" | "Gemini" | "Codex" | "OpenCode" | "Pi" | "Plain";
 
 /** CLI modes that support flags (excludes Plain). */
 export type CliAiMode = Exclude<AiMode, "Plain">;
@@ -127,6 +127,11 @@ export const AI_CLI_CONFIG: Record<AiMode, {
     command: "opencode",
     installHint: "npm install -g opencode-ai",
     skipPermissionsFlag: "--dangerously-skip-permissions",
+  },
+  Pi: {
+    command: "pi",
+    installHint: "Install Pi from https://pi.mariozechner.at",
+    skipPermissionsFlag: null,
   },
   Plain: {
     command: null,
@@ -293,6 +298,8 @@ export function waitForTerminalReady(sessionId: number, timeoutMs = 5000): Promi
 export type CliFlags = {
   skipPermissions: boolean;
   customFlags: string;
+  /** Absolute path to mintlet.ts extension (Pi mode only). */
+  mintletPath?: string;
 };
 
 /**
@@ -321,6 +328,15 @@ export function buildCliCommand(mode: AiMode, flags?: CliFlags): string | null {
   if (flags) {
     if (flags.skipPermissions && config.skipPermissionsFlag) {
       parts.push(config.skipPermissionsFlag);
+    }
+    if (mode === "Pi") {
+      // No --provider flag: Pi uses whatever the user configured via /login.
+      // Forcing claude-cli here breaks Pi's custom tool loop (run_pipeline etc.)
+      // because that provider delegates everything to `claude --print`, which
+      // knows nothing about Pi-registered tools.
+      if (flags.mintletPath?.trim()) {
+        parts.push("-e", flags.mintletPath.trim());
+      }
     }
     if (flags.customFlags.trim()) {
       parts.push(flags.customFlags.trim());

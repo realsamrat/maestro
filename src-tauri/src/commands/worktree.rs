@@ -171,30 +171,47 @@ pub(crate) async fn prepare_worktree_inner(
                 match git.checkout_branch(&fallback).await {
                     Ok(()) => {
                         log::info!("Switched main repo to {}", fallback);
+                        true
                     }
                     Err(e) => {
-                        log::warn!("Failed to switch main repo to {}: {}", fallback, e);
-                        warning = Some(format!(
-                            "Could not switch main repo from {}: {}",
-                            local_branch, e
-                        ));
+                        // Can't switch — uncommitted changes or merge conflict.
+                        // git worktree add would also fail, so bail out early.
+                        log::warn!(
+                            "Cannot create worktree for {}: failed to switch main repo to {}: {}",
+                            local_branch, fallback, e
+                        );
+                        return Ok(WorktreePreparationResult {
+                            working_directory: project_path,
+                            worktree_path: None,
+                            created: false,
+                            warning: Some(format!(
+                                "Could not switch main repo from {} to {}: {}",
+                                local_branch, fallback, e
+                            )),
+                        });
                     }
                 }
             }
             None => {
-                // No other branches exist - detach HEAD to free the branch
+                // No other branches exist - try to detach HEAD to free the branch
                 log::info!("No fallback branch available, detaching HEAD");
                 match git.detach_head().await {
                     Ok(()) => {
                         log::info!("Detached HEAD in main repo");
+                        true
                     }
                     Err(e) => {
-                        log::warn!("Failed to detach HEAD: {}", e);
-                        warning = Some(format!("Could not detach HEAD: {}", e));
+                        log::warn!("Cannot create worktree for {}: failed to detach HEAD: {}", local_branch, e);
+                        return Ok(WorktreePreparationResult {
+                            working_directory: project_path,
+                            worktree_path: None,
+                            created: false,
+                            warning: Some(format!("Could not detach HEAD: {}", e)),
+                        });
                     }
                 }
             }
-        }
+        };
     }
 
     // Ensure the branch exists locally, handling remote branches correctly

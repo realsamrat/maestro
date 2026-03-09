@@ -17,11 +17,105 @@ use super::error::PtyError;
 // Maximum bytes kept in the per-session scrollback ring buffer (128 KB).
 const MAX_SCROLLBACK_BYTES: usize = 131_072;
 
+/// Strips ANSI escape sequences from `s` (e.g. `\x1b[32m`, `\x1b[K`).
+/// Uses a simple state machine — no regex crate needed.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next(); // consume '['
+                    // Consume CSI params + command letter
+                    for ch in chars.by_ref() {
+                        if ch.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Other escapes: skip one more char
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// (prefix, phase_key, done)
+static MINTLET_PHASE_RULES: &[(&str, &str, bool)] = &[
+    // Context — only emits done
+    ("✓ Context", "context", true),
+    // Scout
+    ("▶ Scout", "scout", false),
+    ("✓ Scout", "scout", true),
+    // Plan
+    ("▶ Plan", "plan", false),
+    ("✓ Plan", "plan", true),
+    // Worktree (⎇ signals creation = done enough to mark running→done)
+    ("⎇ Worktree", "worktree", true),
+    // Build
+    ("▶ Build", "build", false),
+    ("✓ Build", "build", true),
+    // Lint
+    ("▶ Lint", "lint", false),
+    ("✓ Lint", "lint", true),
+    ("✗ Lint", "lint", true),
+    // Review
+    ("▶ Review", "review", false),
+    ("✓ Review", "review", true),
+    ("✗ Review", "review", true),
+    // Tests
+    ("▶ Tests", "test-run", false),
+    ("✓ Tests", "test-run", true),
+    ("✗ Tests", "test-run", true),
+    // Test gate
+    ("▶ Test gate", "test-gate", false),
+    ("✓ Test gate", "test-gate", true),
+    ("✗ Test gate", "test-gate", true),
+    // Commit+PR
+    ("▶ Commit", "commit", false),
+    ("✓ Commit", "commit", true),
+    ("✗ Commit", "commit", true),
+];
+
+/// Scans a PTY batch for Mintlet Blueprint phase strings and emits
+/// `mintlet-phase-update` events for any matches found.
+/// Only runs the ANSI strip + line scan when trigger characters are present.
+fn scan_mintlet_phases(app: &AppHandle, session_id: u32, text: &str) {
+    // Fast path: only process if the text contains one of the trigger chars
+    if !text.contains('▶') && !text.contains('✓') && !text.contains('⎇') && !text.contains('✗') {
+        return;
+    }
+    let clean = strip_ansi(text);
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        for &(prefix, phase, done) in MINTLET_PHASE_RULES {
+            if trimmed.starts_with(prefix) {
+                let _ = app.emit(
+                    "mintlet-phase-update",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "phase": phase,
+                        "done": done,
+                    }),
+                );
+                break; // one match per line is enough
+            }
+        }
+    }
+}
+
 /// Appends `text` to the session scrollback ring buffer (trimming oldest bytes
-/// when the cap is exceeded), then emits the Tauri PTY output event.
-/// Centralising both operations avoids missing any emit point.
+/// when the cap is exceeded), scans for Mintlet phase strings, then emits the
+/// Tauri PTY output event. Centralising all operations avoids missing any emit point.
 fn emit_pty_batch(
     app: &AppHandle,
+    session_id: u32,
     event_name: &str,
     text: String,
     scrollback: &Arc<Mutex<Vec<u8>>>,
@@ -34,6 +128,7 @@ fn emit_pty_batch(
             sb.drain(..excess);
         }
     }
+    scan_mintlet_phases(app, session_id, &text);
     let _ = app.emit(event_name, text);
 }
 
@@ -409,7 +504,7 @@ impl ProcessManager {
                                     }
                                     // Flush immediately if buffer exceeds safety valve
                                     if batch_buf.len() >= MAX_BATCH_BYTES {
-                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
+                                        emit_pty_batch(&app, id, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                 }
                                 None => break, // Channel closed
@@ -456,13 +551,13 @@ impl ProcessManager {
                                     }
                                     // Flush immediately if buffer exceeds safety valve
                                     if batch_buf.len() >= MAX_BATCH_BYTES {
-                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
+                                        emit_pty_batch(&app, id, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                 }
                                 None => {
                                     // Channel closed — flush remaining data and exit
                                     if !batch_buf.is_empty() {
-                                        emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
+                                        emit_pty_batch(&app, id, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                                     }
                                     break;
                                 }
@@ -471,13 +566,13 @@ impl ProcessManager {
                         _ = tokio::time::sleep(FLUSH_INTERVAL) => {
                             // Timer fired — flush accumulated data
                             if !batch_buf.is_empty() {
-                                emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
+                                emit_pty_batch(&app, id, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                             }
                         }
                         _ = shutdown_clone.notified() => {
                             // Flush remaining data before shutdown
                             if !batch_buf.is_empty() {
-                                emit_pty_batch(&app, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
+                                emit_pty_batch(&app, id, &event_name, std::mem::take(&mut batch_buf), &scrollback_emit);
                             }
                             break;
                         }
@@ -487,7 +582,7 @@ impl ProcessManager {
 
             // Final flush for any remaining buffered data
             if !batch_buf.is_empty() {
-                emit_pty_batch(&app, &event_name, batch_buf, &scrollback_emit);
+                emit_pty_batch(&app, id, &event_name, batch_buf, &scrollback_emit);
             }
             log::debug!("PTY event emitter {id} exited");
         });

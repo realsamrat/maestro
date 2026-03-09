@@ -2,9 +2,14 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Bot,
+  CheckCircle2,
   ChevronDown,
+  Cpu,
   FlaskConical,
   GitBranch,
+  GitCommit,
+  Hammer,
   ImagePlus,
   Layers,
   ListChecks,
@@ -14,6 +19,7 @@ import {
   Play,
   Plus,
   RotateCcw,
+  Search,
   SkipForward,
   Sparkles,
   Trash2,
@@ -41,6 +47,13 @@ function stageTypeIcon(type: StageType, size = 10) {
   if (type === "review") return <ListChecks size={size} />;
   if (type === "tester") return <FlaskConical size={size} />;
   if (type === "pr") return <GitBranch size={size} />;
+  if (type === "scout") return <Search size={size} />;
+  if (type === "build") return <Hammer size={size} />;
+  if (type === "lint") return <CheckCircle2 size={size} />;
+  if (type === "test-run" || type === "test-gate") return <FlaskConical size={size} />;
+  if (type === "commit") return <GitCommit size={size} />;
+  if (type === "context" || type === "worktree") return <Cpu size={size} />;
+  if (type === "plan") return <Layers size={size} />;
   return <Zap size={size} />;
 }
 
@@ -61,6 +74,52 @@ const STAGE_TYPE_COLORS: Record<StageType, { card: string; badge: string; accent
     accent: "text-orange-400",
   },
   pr: {
+    card: "border-green-400/30",
+    badge: "bg-green-400/15 text-green-400 border border-green-400/30",
+    accent: "text-green-400",
+  },
+  // Blueprint phases — emerald/teal palette
+  context: {
+    card: "border-emerald-500/30",
+    badge: "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30",
+    accent: "text-emerald-400",
+  },
+  scout: {
+    card: "border-teal-400/30",
+    badge: "bg-teal-400/15 text-teal-400 border border-teal-400/30",
+    accent: "text-teal-400",
+  },
+  plan: {
+    card: "border-cyan-400/30",
+    badge: "bg-cyan-400/15 text-cyan-400 border border-cyan-400/30",
+    accent: "text-cyan-400",
+  },
+  worktree: {
+    card: "border-emerald-400/30",
+    badge: "bg-emerald-400/15 text-emerald-400 border border-emerald-400/30",
+    accent: "text-emerald-400",
+  },
+  build: {
+    card: "border-amber-500/30",
+    badge: "bg-amber-500/15 text-amber-400 border border-amber-500/30",
+    accent: "text-amber-400",
+  },
+  lint: {
+    card: "border-yellow-400/30",
+    badge: "bg-yellow-400/15 text-yellow-400 border border-yellow-400/30",
+    accent: "text-yellow-400",
+  },
+  "test-run": {
+    card: "border-orange-400/30",
+    badge: "bg-orange-400/15 text-orange-400 border border-orange-400/30",
+    accent: "text-orange-400",
+  },
+  "test-gate": {
+    card: "border-red-400/30",
+    badge: "bg-red-400/15 text-red-400 border border-red-400/30",
+    accent: "text-red-400",
+  },
+  commit: {
     card: "border-green-400/30",
     badge: "bg-green-400/15 text-green-400 border border-green-400/30",
     accent: "text-green-400",
@@ -738,6 +797,7 @@ function PipelineTab() {
   const onSessionDone = usePipelineStore((s) => s.onSessionDone);
   const reorderStages = usePipelineStore((s) => s.reorderStages);
   const loadPreset = usePipelineStore((s) => s.loadPreset);
+  const loadMintletBlueprint = usePipelineStore((s) => s.loadMintletBlueprint);
   const templates = usePipelineStore((s) => s.templates);
   const saveTemplate = usePipelineStore((s) => s.saveTemplate);
   const deleteTemplate = usePipelineStore((s) => s.deleteTemplate);
@@ -875,6 +935,17 @@ function PipelineTab() {
           {isEnabled ? "Pipeline active — auto-send on Done" : "Pipeline paused"}
         </span>
         <div className="flex-1" />
+
+        {/* Load Mintlet Blueprint button */}
+        <button
+          type="button"
+          onClick={() => loadMintletBlueprint()}
+          className="flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-400 hover:bg-emerald-500/20 transition-colors"
+          title="Load Mintlet Blueprint phases (Context → Scout → Plan → … → Commit+PR)"
+        >
+          <Bot size={10} />
+          Blueprint
+        </button>
 
         {/* Templates dropdown */}
         <div className="relative" ref={templateMenuRef}>

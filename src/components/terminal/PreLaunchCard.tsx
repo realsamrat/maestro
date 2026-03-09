@@ -1,4 +1,5 @@
 import {
+  Bot,
   BrainCircuit,
   Check,
   ChevronDown,
@@ -96,6 +97,7 @@ const AI_MODES: {
   { mode: "Gemini", icon: Sparkles, label: "Gemini CLI", color: "text-blue-400" },
   { mode: "Codex", icon: Code2, label: "Codex", color: "text-green-400" },
   { mode: "OpenCode", icon: OpenCodeIcon, label: "OpenCode", color: "text-purple-500" },
+  { mode: "Pi", icon: Bot, label: "Pi + Mintlet", color: "text-emerald-500" },
   { mode: "Plain", icon: Terminal, label: "Terminal", color: "text-maestro-muted" },
 ];
 

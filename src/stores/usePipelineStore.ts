@@ -1,4 +1,5 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
+import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import { sendPromptToSession } from "@/lib/terminal";
@@ -7,7 +8,10 @@ import { useSessionStore } from "@/stores/useSessionStore";
 // --- Types ---
 
 export type PipelineStageStatus = "pending" | "running" | "done" | "skipped";
-export type StageType = "task" | "review" | "tester" | "pr";
+export type StageType =
+  | "task" | "review" | "tester" | "pr"
+  | "context" | "scout" | "plan" | "worktree"
+  | "build" | "lint" | "test-run" | "test-gate" | "commit";
 export type SessionLifecycle = "persistent" | "fresh-on-rework" | "always-fresh";
 
 export interface RoutingRule {
@@ -100,11 +104,33 @@ const DEFAULT_CHANGES_KEYWORDS = ["changes", "fix", "issue", "fail", "CHANGES:"]
 const DEFAULT_TESTER_APPROVED_KEYWORDS = ["tests-passed", "passed", "all tests", "maestro_status(\"approved\")"];
 const DEFAULT_TESTER_CHANGES_KEYWORDS = ["tests-failed", "failed", "failing", "error", "CHANGES:"];
 
+// --- Blueprint preset ---
+
+/** The 10 Mintlet Blueprint pipeline phases, in order. */
+export const MINTLET_BLUEPRINT_PRESET: Omit<PipelineStage, "id" | "status">[] = [
+  { type: "context",    name: "Context",    sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "scout",      name: "Scout",      sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "plan",       name: "Plan",       sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "worktree",   name: "Worktree",   sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "build",      name: "Build",      sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "lint",       name: "Lint",       sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "review",     name: "Review",     sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "test-run",   name: "Tests",      sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "test-gate",  name: "Test Gate",  sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+  { type: "commit",     name: "Commit+PR",  sessionId: 0, taskPrompt: "", dependsOn: [], feedsFromStages: [], autoSend: false, sessionLifecycle: "persistent", routingRules: [], reviewQueue: [], autoBranch: false, autoBranchPrefix: "", useRufloMemory: false },
+];
+
 // --- Helpers ---
+
+/** Blueprint phase type strings for quick membership check. */
+const BLUEPRINT_TYPES = new Set<StageType>([
+  "context", "scout", "plan", "worktree", "build", "lint", "test-run", "test-gate", "commit",
+]);
 
 function defaultLifecycle(type: StageType): SessionLifecycle {
   if (type === "review" || type === "tester") return "always-fresh";
-  if (type === "pr") return "persistent";
+  if (type === "pr" || type === "commit") return "persistent";
+  if (BLUEPRINT_TYPES.has(type)) return "persistent";
   return "fresh-on-rework";
 }
 
@@ -186,6 +212,10 @@ interface PipelineActions {
   toggleEnabled: () => void;
   clearAll: () => void;
   loadPreset: (stages: Omit<PipelineStage, "id" | "status">[]) => void;
+  /** Load the Mintlet Blueprint 10-phase preset (all stages linked to the given session). */
+  loadMintletBlueprint: (sessionId?: number) => void;
+  /** Update a Blueprint phase stage status based on PTY phase-update events. */
+  updatePhaseStatus: (sessionId: number, phase: string, done: boolean) => void;
   saveTemplate: (name: string) => void;
   deleteTemplate: (templateId: string) => void;
   /** Pull the next waiting queue item and send it to the reviewer session */
@@ -1017,6 +1047,26 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
         });
         set({ stages });
       },
+
+      loadMintletBlueprint: (sessionId = 0) => {
+        const stages: PipelineStage[] = MINTLET_BLUEPRINT_PRESET.map((data) => ({
+          id: crypto.randomUUID(),
+          status: "pending",
+          ...data,
+          sessionId,
+        }));
+        set({ stages });
+      },
+
+      updatePhaseStatus: (sessionId, phase, done) => {
+        set((s) => ({
+          stages: s.stages.map((st) =>
+            st.sessionId === sessionId && (st.type as string) === phase
+              ? { ...st, status: done ? "done" : "running" }
+              : st
+          ),
+        }));
+      },
     }),
     {
       name: "maestro-pipeline",
@@ -1052,3 +1102,12 @@ export const usePipelineStore = create<PipelineState & PipelineActions>()(
     }
   )
 );
+
+// Listen for mintlet phase-update events from the Rust backend
+// Emitted by process_manager.rs when it detects phase strings in Pi PTY output
+listen<{ sessionId: number; phase: string; done: boolean }>(
+  "mintlet-phase-update",
+  ({ payload }) => {
+    usePipelineStore.getState().updatePhaseStatus(payload.sessionId, payload.phase, payload.done);
+  }
+).catch(console.error);

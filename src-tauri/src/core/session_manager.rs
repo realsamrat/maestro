@@ -12,6 +12,7 @@ pub enum AiMode {
     Gemini,
     Codex,
     OpenCode,
+    Pi,
     Plain,
 }
 
