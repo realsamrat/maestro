@@ -45,7 +45,7 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
   error: null,
   lastFetch: null,
   needsAuth: false,
-  showCharacter: true,
+  showCharacter: false,
 
   fetchUsage: async () => {
     set({ isLoading: true, error: null });
