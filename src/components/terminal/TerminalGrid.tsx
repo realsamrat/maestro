@@ -99,7 +99,7 @@ function createEmptySlot(
     id: generateSlotId(),
     mode: "Claude",
     branch: null,
-    worktreeMode: "auto",
+    worktreeMode: "project",
     sessionId: null,
     worktreePath: null,
     worktreeWarning: null,
@@ -510,14 +510,20 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       let detectedBranch: string | null = null;
 
       if (effectiveRepoPath && slot.worktreeMode !== "project") {
-        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch ?? null, worktreeBasePath, slot.worktreeMode === "new");
-        workingDirectory = result.working_directory;
-        worktreePath = result.worktree_path;
-        worktreeWarning = result.warning;
-        detectedBranch = result.branch ?? null;
+        try {
+          const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch ?? null, worktreeBasePath, slot.worktreeMode === "new");
+          workingDirectory = result.working_directory;
+          worktreePath = result.worktree_path;
+          worktreeWarning = result.warning;
+          detectedBranch = result.branch ?? null;
 
-        if (worktreeWarning) {
-          console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
+          if (worktreeWarning) {
+            console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
+          }
+        } catch (err) {
+          // Worktree creation failed — fall back to project directory so the session still launches
+          console.warn(`[Worktree] Failed to prepare worktree, falling back to project path:`, err);
+          workingDirectory = effectiveRepoPath;
         }
       }
       // "project" mode: keep workingDirectory as the project path, no worktree
