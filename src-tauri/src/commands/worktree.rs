@@ -302,6 +302,9 @@ pub async fn get_default_worktree_base_dir() -> Result<String, String> {
 
 /// Returns true if at least one Maestro-managed worktree exists for the given project.
 /// Used by the frontend to enable/disable the "Current Worktree" launch option.
+///
+/// Filters out stale git worktree refs whose directories no longer exist on disk,
+/// so the UI correctly disables "Current Worktree" after a worktree is deleted.
 #[tauri::command]
 pub async fn has_managed_worktree(
     worktree_manager: State<'_, WorktreeManager>,
@@ -312,7 +315,9 @@ pub async fn has_managed_worktree(
         .list_managed(&repo_path)
         .await
         .unwrap_or_default();
-    Ok(!worktrees.is_empty())
+    Ok(worktrees
+        .iter()
+        .any(|wt| std::path::Path::new(&wt.path).exists()))
 }
 
 /// Resolves a branch reference to the local branch name.
