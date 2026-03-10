@@ -520,6 +520,11 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
           if (worktreeWarning) {
             console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
           }
+          if (worktreePath) {
+            // A worktree was created or reused — refresh so hasManagedWorktree updates
+            // and the "Current Worktree" button becomes active for new slots.
+            refreshBranches();
+          }
         } catch (err) {
           // Worktree creation failed — fall back to project directory so the session still launches
           console.warn(`[Worktree] Failed to prepare worktree, falling back to project path:`, err);
@@ -706,7 +711,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       console.error("Failed to spawn shell:", err);
       setError("Failed to start terminal session");
     }
-  }, [projectPath, effectiveRepoPath, worktreeBasePath, tabId, addSessionToProject]);
+  }, [projectPath, effectiveRepoPath, worktreeBasePath, tabId, addSessionToProject, refreshBranches]);
 
   /**
    * Launches a single slot by spawning a shell with the configured settings.
