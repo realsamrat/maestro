@@ -474,7 +474,7 @@ mod tests {
     async fn test_prepare_no_branch_auto_detects_and_creates_worktree() {
         let (_dir, path) = create_test_repo().await;
         let wm = WorktreeManager::new();
-        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
+        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None, false)
             .await
             .unwrap();
 
@@ -501,6 +501,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -540,6 +541,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             None,
             Some(base_str.clone()),
+            false,
         )
         .await
         .unwrap();
@@ -551,6 +553,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             None,
             Some(base_str.clone()),
+            false,
         )
         .await
         .unwrap();
@@ -578,7 +581,7 @@ mod tests {
         // NOT a git repo — current_branch() will fail → fall back gracefully
 
         let wm = WorktreeManager::new();
-        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None)
+        let result = prepare_worktree_inner(&wm, path.to_string_lossy().to_string(), None, None, false)
             .await
             .unwrap();
 
@@ -604,6 +607,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some(current.clone()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -620,11 +624,12 @@ mod tests {
             "Working directory should NOT be the main repo"
         );
 
-        // Verify main repo switched away from the target branch
+        // With --force worktree add, main repo stays on the same branch
+        // (no checkout switch needed, so uncommitted changes are preserved)
         let new_current = git.current_branch().await.unwrap();
-        assert_ne!(
+        assert_eq!(
             new_current, current,
-            "Main repo should have switched to a different branch"
+            "Main repo should stay on the same branch when --force is used"
         );
 
         // Cleanup
@@ -645,6 +650,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some(current.clone()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -673,6 +679,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("feature-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -704,6 +711,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("reuse-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -715,6 +723,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("reuse-test".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -736,6 +745,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("brand-new-branch".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -764,6 +774,7 @@ mod tests {
             path.to_string_lossy().to_string(),
             Some("main".to_string()),
             None,
+            false,
         )
         .await
         .unwrap();
