@@ -232,6 +232,12 @@ pub async fn get_claude_usage() -> Result<UsageData, String> {
         });
     }
 
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        // Rate limited — return silently with no error (stale data is fine)
+        log::debug!("Usage API rate limited (429), will retry at next poll");
+        return Ok(UsageData::default());
+    }
+
     if !response.status().is_success() {
         let status = response.status();
         log::warn!("Usage API returned {}", status);

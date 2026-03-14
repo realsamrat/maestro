@@ -82,6 +82,40 @@ pub struct RemoteInfo {
     pub url: String,
 }
 
+/// The type of change to a file in the working tree or index.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeType {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Untracked,
+    Unknown,
+}
+
+/// A single file entry from `git status --porcelain=v1`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusEntry {
+    pub path: String,
+    /// True if this entry is staged in the index; false if unstaged/untracked.
+    pub staged: bool,
+    pub change: ChangeType,
+}
+
+fn char_to_change_type(c: char) -> ChangeType {
+    match c {
+        'A' => ChangeType::Added,
+        'M' => ChangeType::Modified,
+        'D' => ChangeType::Deleted,
+        'R' => ChangeType::Renamed,
+        'C' => ChangeType::Copied,
+        '?' => ChangeType::Untracked,
+        _ => ChangeType::Unknown,
+    }
+}
+
 impl Git {
     /// Lists all local and remote branches, excluding `HEAD` pointer entries.
     ///
@@ -227,8 +261,30 @@ impl Git {
         new_branch: Option<&str>,
         checkout_ref: Option<&str>,
     ) -> Result<WorktreeInfo, GitError> {
+        self.worktree_add_inner(path, new_branch, checkout_ref, false).await
+    }
+
+    pub async fn worktree_add_force(
+        &self,
+        path: &Path,
+        checkout_ref: Option<&str>,
+    ) -> Result<WorktreeInfo, GitError> {
+        self.worktree_add_inner(path, None, checkout_ref, true).await
+    }
+
+    async fn worktree_add_inner(
+        &self,
+        path: &Path,
+        new_branch: Option<&str>,
+        checkout_ref: Option<&str>,
+        force: bool,
+    ) -> Result<WorktreeInfo, GitError> {
         let path_str = path.to_string_lossy();
         let mut args = vec!["worktree", "add"];
+
+        if force {
+            args.push("--force");
+        }
 
         // Collect owned strings to extend their lifetime
         let branch_flag;
@@ -659,6 +715,112 @@ impl Git {
     /// In the main working tree these are equal (both `.git`); in a linked worktree
     /// `--git-dir` points to `.git/worktrees/<name>` while `--git-common-dir` points
     /// to the shared `.git` directory.
+    /// Lists working tree status entries (staged and unstaged changes).
+    ///
+    /// Parses `git status --porcelain=v1` output.
+    /// Returns entries for both staged (index) and unstaged (working tree) changes.
+    pub async fn status(&self) -> Result<Vec<StatusEntry>, GitError> {
+        let output = self.run(&["status", "--porcelain=v1"]).await?;
+        let mut entries = Vec::new();
+
+        for line in output.lines() {
+            if line.len() < 3 {
+                continue;
+            }
+            let xy: Vec<char> = line.chars().take(2).collect();
+            let (x, y) = (xy[0], xy[1]);
+            // Handle rename: "old -> new" format
+            let path_part = &line[3..];
+            let path = if let Some(arrow) = path_part.find(" -> ") {
+                path_part[arrow + 4..].to_string()
+            } else {
+                path_part.to_string()
+            };
+
+            let index_status = x;
+            let worktree_status = y;
+
+            // Staged change (index modified)
+            if index_status != ' ' && index_status != '?' {
+                entries.push(StatusEntry {
+                    path: path.clone(),
+                    staged: true,
+                    change: char_to_change_type(index_status),
+                });
+            }
+            // Unstaged/untracked change
+            if worktree_status != ' ' {
+                entries.push(StatusEntry {
+                    path: path.clone(),
+                    staged: false,
+                    change: if worktree_status == '?' {
+                        ChangeType::Untracked
+                    } else {
+                        char_to_change_type(worktree_status)
+                    },
+                });
+            }
+        }
+
+        Ok(entries)
+    }
+
+    /// Stages all changes (`git add .`).
+    pub async fn stage_all(&self) -> Result<(), GitError> {
+        self.run(&["add", "."]).await?;
+        Ok(())
+    }
+
+    /// Creates a commit with the given message.
+    /// Returns the short commit hash of the new commit.
+    pub async fn commit(&self, message: &str) -> Result<String, GitError> {
+        self.run(&["commit", "-m", message]).await?;
+        // Get the short hash of the new HEAD
+        let hash = self.run(&["rev-parse", "--short", "HEAD"]).await?;
+        Ok(hash.trimmed().to_string())
+    }
+
+    /// Pushes the current branch to the given remote (default: origin).
+    /// Sets upstream tracking on first push if `set_upstream` is true.
+    pub async fn push(&self, remote: Option<&str>, branch: Option<&str>, set_upstream: bool) -> Result<(), GitError> {
+        let mut args = vec!["push"];
+        if set_upstream {
+            args.push("--set-upstream");
+        }
+        let remote = remote.unwrap_or("origin");
+        args.push(remote);
+        if let Some(b) = branch {
+            args.push(b);
+        }
+        self.run_with_timeout(&args, std::time::Duration::from_secs(60)).await?;
+        Ok(())
+    }
+
+    /// Pulls from the given remote (default: origin) and branch.
+    pub async fn pull(&self, remote: Option<&str>, branch: Option<&str>) -> Result<(), GitError> {
+        let mut args = vec!["pull"];
+        let remote_str;
+        if let Some(r) = remote {
+            remote_str = r.to_string();
+            args.push(&remote_str);
+        }
+        let branch_str;
+        if let Some(b) = branch {
+            branch_str = b.to_string();
+            args.push(&branch_str);
+        }
+        self.run_with_timeout(&args, std::time::Duration::from_secs(60)).await?;
+        Ok(())
+    }
+
+    /// Checks if the current branch has an upstream tracking branch configured.
+    pub async fn has_upstream(&self) -> Result<bool, GitError> {
+        match self.run(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).await {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
     pub async fn is_worktree(&self) -> Result<bool, GitError> {
         let git_dir = self.run(&["rev-parse", "--git-dir"]).await?;
         let common_dir = self.run(&["rev-parse", "--git-common-dir"]).await?;

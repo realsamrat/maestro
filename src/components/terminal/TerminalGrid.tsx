@@ -32,6 +32,7 @@ import { checkFullDiskAccess, pathRequiresFDA } from "@/lib/permissions";
 import { useFDAStore } from "@/stores/useFDAStore";
 import { useCliSettingsStore } from "@/stores/useCliSettingsStore";
 import { cleanupSessionWorktree, prepareSessionWorktree } from "@/lib/worktreeManager";
+import { useWorktreeSettingsStore } from "@/stores/useWorktreeSettingsStore";
 import { useTerminalKeyboard } from "@/hooks/useTerminalKeyboard";
 import { useMcpStore } from "@/stores/useMcpStore";
 import { usePluginStore } from "@/stores/usePluginStore";
@@ -98,6 +99,7 @@ function createEmptySlot(
     id: generateSlotId(),
     mode: "Claude",
     branch: null,
+    worktreeMode: "project",
     sessionId: null,
     worktreePath: null,
     worktreeWarning: null,
@@ -204,6 +206,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
   const [branches, setBranches] = useState<BranchWithWorktreeStatus[]>([]);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [isGitRepo, setIsGitRepo] = useState(true);
+  const [hasManagedWorktree, setHasManagedWorktree] = useState(false);
 
   // Refs for cleanup
   const slotsRef = useRef<SessionSlot[]>([]);
@@ -322,6 +325,10 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         setIsGitRepo(false);
         setIsLoadingBranches(false);
       });
+
+    invoke<boolean>("has_managed_worktree", { projectPath: effectiveRepoPath })
+      .then(setHasManagedWorktree)
+      .catch(() => setHasManagedWorktree(false));
   }, [effectiveRepoPath]);
 
   // Fetch branches when effectiveRepoPath is available
@@ -496,23 +503,35 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         });
       }
 
-      // Determine the working directory
-      // If a branch is selected, prepare a worktree first
-      // For multi-repo workspaces, use effectiveRepoPath for git operations
+      // Determine the working directory based on the selected worktree mode.
       let workingDirectory = effectiveRepoPath ?? projectPath;
       let worktreePath: string | null = null;
       let worktreeWarning: string | null = null;
+      let detectedBranch: string | null = null;
 
-      if (effectiveRepoPath && slot.branch) {
-        const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch, worktreeBasePath);
-        workingDirectory = result.working_directory;
-        worktreePath = result.worktree_path;
-        worktreeWarning = result.warning;
+      if (effectiveRepoPath && slot.worktreeMode !== "project") {
+        try {
+          const result = await prepareSessionWorktree(effectiveRepoPath, slot.branch ?? null, worktreeBasePath, slot.worktreeMode === "new");
+          workingDirectory = result.working_directory;
+          worktreePath = result.worktree_path;
+          worktreeWarning = result.warning;
+          detectedBranch = result.branch ?? null;
 
-        if (worktreeWarning) {
-          console.error(`[Worktree] Warning for branch "${slot.branch}": ${worktreeWarning}`);
+          if (worktreeWarning) {
+            console.error(`[Worktree] Warning for branch "${slot.branch ?? "auto"}": ${worktreeWarning}`);
+          }
+          if (worktreePath) {
+            // A worktree was created or reused — refresh so hasManagedWorktree updates
+            // and the "Current Worktree" button becomes active for new slots.
+            refreshBranches();
+          }
+        } catch (err) {
+          // Worktree creation failed — fall back to project directory so the session still launches
+          console.warn(`[Worktree] Failed to prepare worktree, falling back to project path:`, err);
+          workingDirectory = effectiveRepoPath;
         }
       }
+      // "project" mode: keep workingDirectory as the project path, no worktree
 
       // Generate project hash for MCP status identification
       // This is passed as MAESTRO_PROJECT_HASH env var to enable process-isolated
@@ -539,13 +558,19 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
         });
       }
 
-      // Assign the branch to the session so the header displays it
-      if (slot.branch) {
-        const updatedConfig = await assignSessionBranch(sessionId, slot.branch, worktreePath);
+      // Assign the branch to the session so the header displays it.
+      const effectiveBranch = slot.branch ?? detectedBranch;
+      if (effectiveBranch && worktreePath) {
+        // Explicit or auto-detected branch with a worktree: register both in the backend.
+        const updatedConfig = await assignSessionBranch(sessionId, effectiveBranch, worktreePath);
         useSessionStore.getState().updateSession(sessionId, {
           branch: updatedConfig.branch,
           worktree_path: updatedConfig.worktree_path,
         });
+      } else if (effectiveBranch) {
+        // Branch detected but no worktree was created (e.g. fallback to project path).
+        // Just record the branch for display, worktree_path stays null.
+        useSessionStore.getState().updateSession(sessionId, { branch: effectiveBranch });
       }
 
       // Save enabled MCP servers for this session
@@ -686,7 +711,7 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       console.error("Failed to spawn shell:", err);
       setError("Failed to start terminal session");
     }
-  }, [projectPath, effectiveRepoPath, tabId, addSessionToProject]);
+  }, [projectPath, effectiveRepoPath, worktreeBasePath, tabId, addSessionToProject, refreshBranches]);
 
   /**
    * Launches a single slot by spawning a shell with the configured settings.
@@ -791,12 +816,27 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       removeSessionHooksConfig(workingDir).catch(console.error);
     }
 
-    // Clean up worktree if one was created (fire-and-forget)
-    // Use effectiveRepoPath for worktree cleanup since worktrees are git-repo specific
+    // Handle worktree cleanup based on user preference
     if (effectiveRepoPath && worktreePath) {
-      cleanupSessionWorktree(effectiveRepoPath, worktreePath)
-        .then(() => refreshBranches())
-        .catch(console.error);
+      const closeAction = useWorktreeSettingsStore.getState().worktreeCloseAction;
+      if (closeAction === "delete") {
+        cleanupSessionWorktree(effectiveRepoPath, worktreePath)
+          .then(() => refreshBranches())
+          .catch(console.error);
+      } else if (closeAction === "ask") {
+        ask("Delete the worktree for this session?\n\nThis will remove the working directory and any uncommitted changes.", {
+          title: "Delete Worktree?",
+          kind: "warning",
+        }).then((shouldDelete) => {
+          if (shouldDelete) {
+            cleanupSessionWorktree(effectiveRepoPath, worktreePath).catch(console.error);
+          }
+          refreshBranches();
+        }).catch(() => {});
+      } else {
+        // keep (default)
+        refreshBranches();
+      }
     }
   }, [tabId, effectiveRepoPath, projectPath, removeSessionFromProject, refreshBranches, focusedSlotId, layoutTree]);
 
@@ -859,6 +899,14 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
     setSlots((prev) =>
       prev.map((s) =>
         s.id === slotId ? { ...s, mode } : s
+      )
+    );
+  }, []);
+
+  const updateSlotWorktreeMode = useCallback((slotId: string, worktreeMode: import("./PreLaunchCard").WorktreeMode) => {
+    setSlots((prev) =>
+      prev.map((s) =>
+        s.id === slotId ? { ...s, worktreeMode } : s
       )
     );
   }, []);
@@ -1098,6 +1146,68 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [zoomedSlotId, handleToggleZoom]);
 
+  const renderLeaf = useCallback((slotId: string) => {
+    const slot = slots.find((s) => s.id === slotId);
+    if (!slot) return null;
+
+    if (slot.sessionId !== null) {
+      return (
+        <TerminalView
+          key={slot.id}
+          sessionId={slot.sessionId}
+          isFocused={focusedSlotId === slot.id}
+          isActive={isActive}
+          onFocus={getFocusCallback(slot.id)}
+          onKill={handleKill}
+          terminalCount={slots.length}
+          isZoomed={false}
+          onToggleZoom={() => handleToggleZoom(slot.id)}
+        />
+      );
+    }
+
+    return (
+      <PreLaunchCard
+        key={slot.id}
+        slot={slot}
+        projectPath={projectPath ?? ""}
+        branches={branches}
+        isLoadingBranches={isLoadingBranches}
+        isGitRepo={isGitRepo}
+        repositories={repositories}
+        workspaceType={workspaceType}
+        selectedRepoPath={effectiveRepoPath}
+        onRepoChange={onRepoChange}
+        fetchBranchesForRepo={getBranchesWithWorktreeStatus}
+        mcpServers={mcpServers}
+        skills={skills}
+        plugins={plugins}
+        onCreateBranch={handleCreateBranch}
+        onModeChange={(mode) => updateSlotMode(slot.id, mode)}
+        onBranchChange={(branch) => updateSlotBranch(slot.id, branch)}
+        onWorktreeModeChange={(m) => updateSlotWorktreeMode(slot.id, m)}
+        hasManagedWorktree={hasManagedWorktree}
+        onRefreshBranches={refreshBranches}
+        onMcpToggle={(serverName) => toggleSlotMcp(slot.id, serverName)}
+        onSkillToggle={(skillId) => toggleSlotSkill(slot.id, skillId)}
+        onPluginToggle={(pluginId) => toggleSlotPlugin(slot.id, pluginId)}
+        onMcpSelectAll={() => selectAllMcp(slot.id)}
+        onMcpUnselectAll={() => unselectAllMcp(slot.id)}
+        onPluginsSelectAll={() => selectAllPlugins(slot.id)}
+        onPluginsUnselectAll={() => unselectAllPlugins(slot.id)}
+        onLaunch={() => launchSlot(slot.id)}
+        onRemove={() => removeSlot(slot.id)}
+        isZoomed={false}
+        onToggleZoom={() => handleToggleZoom(slot.id)}
+      />
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- Deps cover all render-affecting state
+  }, [slots, focusedSlotId, isActive, getFocusCallback, handleKill, handleToggleZoom, projectPath, branches, isLoadingBranches, isGitRepo, hasManagedWorktree, repositories, workspaceType, effectiveRepoPath, onRepoChange, mcpServers, skills, plugins, handleCreateBranch, updateSlotMode, updateSlotBranch, updateSlotWorktreeMode, refreshBranches, toggleSlotMcp, toggleSlotSkill, toggleSlotPlugin, selectAllMcp, unselectAllMcp, selectAllPlugins, unselectAllPlugins, launchSlot, removeSlot]);
+
+  const handleRatioChange = useCallback((nodeId: string, ratio: number) => {
+    setLayoutTree((prev) => updateRatio(prev, nodeId, ratio));
+  }, []);
+
   if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-maestro-muted">
@@ -1208,6 +1318,9 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
                 onCreateBranch={handleCreateBranch}
                 onModeChange={(mode) => updateSlotMode(zoomedSlot.id, mode)}
                 onBranchChange={(branch) => updateSlotBranch(zoomedSlot.id, branch)}
+                onWorktreeModeChange={(m) => updateSlotWorktreeMode(zoomedSlot.id, m)}
+                hasManagedWorktree={hasManagedWorktree}
+                onRefreshBranches={refreshBranches}
                 onMcpToggle={(serverName) => toggleSlotMcp(zoomedSlot.id, serverName)}
                 onSkillToggle={(skillId) => toggleSlotSkill(zoomedSlot.id, skillId)}
                 onPluginToggle={(pluginId) => toggleSlotPlugin(zoomedSlot.id, pluginId)}
@@ -1226,65 +1339,6 @@ export const TerminalGrid = forwardRef<TerminalGridHandle, TerminalGridProps>(fu
       );
     }
   }
-
-  const renderLeaf = useCallback((slotId: string) => {
-    const slot = slots.find((s) => s.id === slotId);
-    if (!slot) return null;
-
-    if (slot.sessionId !== null) {
-      return (
-        <TerminalView
-          key={slot.id}
-          sessionId={slot.sessionId}
-          isFocused={focusedSlotId === slot.id}
-          isActive={isActive}
-          onFocus={getFocusCallback(slot.id)}
-          onKill={handleKill}
-          terminalCount={slots.length}
-          isZoomed={false}
-          onToggleZoom={() => handleToggleZoom(slot.id)}
-        />
-      );
-    }
-
-    return (
-      <PreLaunchCard
-        key={slot.id}
-        slot={slot}
-        projectPath={projectPath ?? ""}
-        branches={branches}
-        isLoadingBranches={isLoadingBranches}
-        isGitRepo={isGitRepo}
-        repositories={repositories}
-        workspaceType={workspaceType}
-        selectedRepoPath={effectiveRepoPath}
-        onRepoChange={onRepoChange}
-        fetchBranchesForRepo={getBranchesWithWorktreeStatus}
-        mcpServers={mcpServers}
-        skills={skills}
-        plugins={plugins}
-        onCreateBranch={handleCreateBranch}
-        onModeChange={(mode) => updateSlotMode(slot.id, mode)}
-        onBranchChange={(branch) => updateSlotBranch(slot.id, branch)}
-        onMcpToggle={(serverName) => toggleSlotMcp(slot.id, serverName)}
-        onSkillToggle={(skillId) => toggleSlotSkill(slot.id, skillId)}
-        onPluginToggle={(pluginId) => toggleSlotPlugin(slot.id, pluginId)}
-        onMcpSelectAll={() => selectAllMcp(slot.id)}
-        onMcpUnselectAll={() => unselectAllMcp(slot.id)}
-        onPluginsSelectAll={() => selectAllPlugins(slot.id)}
-        onPluginsUnselectAll={() => unselectAllPlugins(slot.id)}
-        onLaunch={() => launchSlot(slot.id)}
-        onRemove={() => removeSlot(slot.id)}
-        isZoomed={false}
-        onToggleZoom={() => handleToggleZoom(slot.id)}
-      />
-    );
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- Deps cover all render-affecting state
-  }, [slots, focusedSlotId, isActive, getFocusCallback, handleKill, handleToggleZoom, projectPath, branches, isLoadingBranches, isGitRepo, repositories, workspaceType, effectiveRepoPath, onRepoChange, mcpServers, skills, plugins, handleCreateBranch, updateSlotMode, updateSlotBranch, toggleSlotMcp, toggleSlotSkill, toggleSlotPlugin, selectAllMcp, unselectAllMcp, selectAllPlugins, unselectAllPlugins, launchSlot, removeSlot]);
-
-  const handleRatioChange = useCallback((nodeId: string, ratio: number) => {
-    setLayoutTree((prev) => updateRatio(prev, nodeId, ratio));
-  }, []);
 
   return (
     <div className={`flex h-full bg-maestro-bg p-2 ${isDragging ? "split-dragging" : ""}`}>

@@ -11,6 +11,8 @@ export type AiModeCliFlags = {
   skipPermissions: boolean;
   /** Space-separated additional custom flags. */
   customFlags: string;
+  /** Absolute path to mintlet.ts (Pi mode only). */
+  mintletPath?: string;
 };
 
 /** CLI flags configuration for all AI modes. */
@@ -27,6 +29,8 @@ type CliSettingsActions = {
   setSkipPermissions: (mode: Exclude<AiMode, "Plain">, value: boolean) => void;
   /** Update the custom flags for a mode. */
   setCustomFlags: (mode: Exclude<AiMode, "Plain">, value: string) => void;
+  /** Update the mintlet path (Pi mode only). */
+  setMintletPath: (mode: Exclude<AiMode, "Plain">, value: string) => void;
   /** Reset all settings for a specific mode to defaults. */
   resetModeToDefaults: (mode: Exclude<AiMode, "Plain">) => void;
   /** Reset all settings to defaults. */
@@ -47,6 +51,7 @@ const DEFAULT_FLAGS: CliFlagsConfig = {
   Gemini: { ...DEFAULT_MODE_FLAGS },
   Codex: { ...DEFAULT_MODE_FLAGS },
   OpenCode: { ...DEFAULT_MODE_FLAGS },
+  Pi: { ...DEFAULT_MODE_FLAGS, mintletPath: "" },
 };
 
 // --- Tauri LazyStore-backed StateStorage adapter ---
@@ -127,24 +132,32 @@ export const useCliSettingsStore = create<CliSettingsState & CliSettingsActions>
         });
       },
 
-      resetModeToDefaults: (mode) => {
+      setMintletPath: (mode, value) => {
         set({
           flags: {
             ...get().flags,
-            [mode]: { ...DEFAULT_MODE_FLAGS },
+            [mode]: {
+              ...get().flags[mode],
+              mintletPath: value,
+            },
+          },
+        });
+      },
+
+      resetModeToDefaults: (mode) => {
+        const defaults = mode === "Pi"
+          ? { ...DEFAULT_MODE_FLAGS, mintletPath: "" }
+          : { ...DEFAULT_MODE_FLAGS };
+        set({
+          flags: {
+            ...get().flags,
+            [mode]: defaults,
           },
         });
       },
 
       resetAllToDefaults: () => {
-        set({
-          flags: {
-            Claude: { ...DEFAULT_MODE_FLAGS },
-            Gemini: { ...DEFAULT_MODE_FLAGS },
-            Codex: { ...DEFAULT_MODE_FLAGS },
-            OpenCode: { ...DEFAULT_MODE_FLAGS },
-          },
-        });
+        set({ flags: DEFAULT_FLAGS });
       },
 
       getFlags: (mode) => {

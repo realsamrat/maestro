@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { GitFork, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getDeduplicatedCurrentBranch } from "@/lib/git";
@@ -13,7 +14,9 @@ import { useAppKeyboard } from "./hooks/useAppKeyboard";
 import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useUpdateStore } from "./stores/useUpdateStore";
 import { initActivityListener, stopActivityListener } from "./stores/useActivityStore";
+import { usePipelineStore } from "./stores/usePipelineStore";
 import { UpdateNotification } from "./components/update/UpdateNotification";
+import { OrchestratorPanel } from "./components/orchestrator/OrchestratorPanel";
 import { GitGraphPanel } from "./components/git/GitGraphPanel";
 import { BottomBar } from "./components/shared/BottomBar";
 import { FDADialog } from "./components/shared/FDADialog";
@@ -52,6 +55,7 @@ function App() {
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [sessionCounts, setSessionCounts] = useState<Map<string, { slotCount: number; launchedCount: number }>>(new Map());
   const [isStoppingAll, setIsStoppingAll] = useState(false);
+  const [showOrchestrator, setShowOrchestrator] = useState(false);
   const [currentBranch, setCurrentBranch] = useState<string | undefined>(undefined);
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = localStorage.getItem("maestro-theme");
@@ -72,25 +76,37 @@ function App() {
     }
   }, []);
 
-  // Clean up orphaned PTY sessions on mount (e.g., after page reload)
-  // This ensures no stale processes remain from the previous frontend state
+  // Initialize session store: remove only PTY sessions whose processes have
+  // already died, then fetch current state and subscribe to events.
+  // Live sessions (e.g. from a WebView reload) survive and are reconnected.
   useEffect(() => {
-    invoke<number>("kill_all_sessions")
+    invoke<number>("cleanup_dead_sessions")
       .then((count) => {
         if (count > 0) {
-          console.log(`Cleaned up ${count} orphaned PTY session(s) from previous page load`);
+          console.log(`Cleaned up ${count} dead PTY session(s)`);
+        }
+        return fetchSessions();
+      })
+      .then(() => {
+        // Re-associate surviving sessions with their workspace tabs so
+        // TerminalGrid renders them. (useWorkspaceStore clears sessionIds on
+        // rehydrate for safety; here we restore the ones that are alive.)
+        const sessions = useSessionStore.getState().sessions;
+        if (sessions.length > 0) {
+          const { getTabByPath, addSessionToProject, setSessionsLaunched } =
+            useWorkspaceStore.getState();
+          for (const session of sessions) {
+            const tab = getTabByPath(session.project_path);
+            if (tab) {
+              addSessionToProject(tab.id, session.id);
+              setSessionsLaunched(tab.id, true);
+            }
+          }
         }
       })
       .catch((err) => {
-        console.error("Failed to clean up orphaned sessions:", err);
+        console.error("Failed to initialize sessions:", err);
       });
-  }, []);
-
-  // Initialize session store: fetch initial state and subscribe to events
-  useEffect(() => {
-    fetchSessions().catch((err) => {
-      console.error("Failed to fetch sessions:", err);
-    });
 
     const unlistenPromise = initListeners().catch((err) => {
       console.error("Failed to initialize listeners:", err);
@@ -101,6 +117,24 @@ function App() {
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, [fetchSessions, initListeners]);
+
+  // Pipeline: listen for session Done events and trigger next stages
+  const pipelineOnSessionDone = usePipelineStore((s) => s.onSessionDone);
+  const pipelineEnabled = usePipelineStore((s) => s.isEnabled);
+  useEffect(() => {
+    if (!pipelineEnabled) return;
+    const unlistenPromise = listen<{ session_id: number; status: string; message?: string }>(
+      "session-status-changed",
+      (event) => {
+        if (event.payload.status === "Done") {
+          pipelineOnSessionDone(event.payload.session_id, event.payload.message ?? "");
+        }
+      }
+    );
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [pipelineEnabled, pipelineOnSessionDone]);
 
   // Initialize terminal settings store (detects available fonts)
   const initializeTerminalSettings = useTerminalSettingsStore((s) => s.initialize);
@@ -280,6 +314,8 @@ function App() {
                 setCurrentBranch(newBranch);
                 multiProjectRef.current?.refreshBranchesInActiveProject();
               }}
+              showOrchestrator={showOrchestrator}
+              onToggleOrchestrator={() => setShowOrchestrator((prev) => !prev)}
             />
 
             {/* Git panel header - inline at same level as TopBar */}
@@ -337,6 +373,11 @@ function App() {
               currentBranch={currentBranch ?? null}
             />
           </div>
+
+          {/* Orchestrator panel — slides in above bottom bar */}
+          {showOrchestrator && (
+            <OrchestratorPanel onClose={() => setShowOrchestrator(false)} />
+          )}
 
           {/* Bottom action bar */}
           <div className="bg-maestro-bg">

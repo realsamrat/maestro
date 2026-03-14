@@ -6,8 +6,8 @@ import {
   type TamagotchiMood,
 } from "@/lib/usageParser";
 
-/** Polling interval for usage updates (60 seconds). */
-const POLL_INTERVAL_MS = 60_000;
+/** Polling interval for usage updates (5 minutes). */
+const POLL_INTERVAL_MS = 5 * 60_000;
 
 interface UsageState {
   /** Raw usage data from backend. */
@@ -45,7 +45,7 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
   error: null,
   lastFetch: null,
   needsAuth: false,
-  showCharacter: true,
+  showCharacter: false,
 
   fetchUsage: async () => {
     set({ isLoading: true, error: null });

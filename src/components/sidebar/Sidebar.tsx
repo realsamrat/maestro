@@ -56,6 +56,14 @@ import type { McpCustomServer } from "@/lib/mcp";
 import { checkClaudeMd, type ClaudeMdStatus } from "@/lib/claudemd";
 import { OpenCodeIcon } from "@/components/icons/OpenCodeIcon";
 
+/**
+ * Normalize macOS /private/ symlink so canonical (Rust) and dialog paths compare equal.
+ * `std::fs::canonicalize` resolves /Users → /private/Users on macOS.
+ */
+function normalizePath(p: string): string {
+  return p.replace(/^\/private\//, "/").replace(/\/$/, "");
+}
+
 type SidebarTab = "config" | "processes";
 
 interface SidebarProps {
@@ -596,11 +604,19 @@ function SessionsSection() {
   const [expanded, setExpanded] = useState(true);
   const allSessions = useSessionStore((s) => s.sessions);
   const tabs = useWorkspaceStore((s) => s.tabs);
+  const setSessionsLaunched = useWorkspaceStore((s) => s.setSessionsLaunched);
   const activeTab = tabs.find((t) => t.active);
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
+
+  // Clicking a session row ensures the terminal grid is visible
+  const handleSessionClick = () => {
+    if (activeTab && !activeTab.sessionsLaunched) {
+      setSessionsLaunched(activeTab.id, true);
+    }
+  };
 
   return (
     <div className={cardClass}>
@@ -629,16 +645,18 @@ function SessionsSection() {
             <div className="px-2 py-1 text-[11px] text-maestro-muted/60">No sessions yet</div>
           ) : (
             sessions.map((s) => (
-              <div
+              <button
                 key={s.id}
-                title={s.statusMessage || s.needsInputPrompt || STATUS_LABEL[s.status]}
-                className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-maestro-text hover:bg-maestro-border/40"
+                type="button"
+                onClick={handleSessionClick}
+                title={s.statusMessage || s.needsInputPrompt || `Open session #${s.id} in terminal grid`}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-xs text-maestro-text hover:bg-maestro-border/40 cursor-pointer"
               >
                 <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT_CLASS[s.status]}`} />
                 <Bot size={12} className="text-maestro-purple shrink-0" />
-                <span className="flex-1 font-medium">#{s.id}</span>
+                <span className="flex-1 text-left font-medium">#{s.id}</span>
                 <span className="text-[10px] text-maestro-muted">{STATUS_LABEL[s.status]}</span>
-              </div>
+              </button>
             ))
           )}
         </div>
@@ -665,6 +683,7 @@ const MODE_ICON: Record<AiMode, React.ElementType> = {
   Gemini: Sparkles,
   Codex: Cpu,
   OpenCode: OpenCodeIcon,
+  Pi: Bot,
   Plain: Globe,
 };
 
@@ -675,7 +694,7 @@ function StatusSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only count those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
   const counts = sessions.reduce(
     (acc, session) => {
       acc.status[session.status] = (acc.status[session.status] ?? 0) + 1;
@@ -1487,7 +1506,7 @@ function AgentSessionsSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const sessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const sessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
 
   return (
     <div className={cardClass}>
@@ -1539,7 +1558,7 @@ function ProcessTreeSection() {
   const activeProjectPath = activeTab?.projectPath ?? "";
 
   // Filter sessions to only show those belonging to the active project
-  const projectSessions = allSessions.filter((s) => s.project_path === activeProjectPath);
+  const projectSessions = allSessions.filter((s) => normalizePath(s.project_path) === normalizePath(activeProjectPath));
   const projectSessionIds = new Set(projectSessions.map((s) => s.id));
 
   // Filter trees to only show those for the active project's sessions

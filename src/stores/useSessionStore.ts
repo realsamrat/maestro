@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { create } from "zustand";
 
 /** AI provider variants supported by the backend orchestrator. */
-export type AiMode = "Claude" | "Gemini" | "Codex" | "OpenCode" | "Plain";
+export type AiMode = "Claude" | "Gemini" | "Codex" | "OpenCode" | "Pi" | "Plain";
 
 /**
  * Backend-emitted session lifecycle states.
@@ -145,18 +145,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   addSession: (session: SessionConfig) => {
-    // Clear any stale buffered status for this session ID across ALL projects
-    // This prevents pollution from old sessions with the same ID
+    // Read the buffered status FIRST, before the cleanup loop can delete it
+    const bufferKey = statusBufferKey(session.id, session.project_path);
+    const bufferedStatus = pendingStatusUpdates.get(bufferKey);
+
+    // Clear stale buffered status for OTHER keys with this session ID (different projects)
     for (const key of pendingStatusUpdates.keys()) {
-      if (key.startsWith(`${session.id}:`)) {
+      if (key.startsWith(`${session.id}:`) && key !== bufferKey) {
         console.log(`[SessionStore] Clearing stale buffered status for key: '${key}'`);
         pendingStatusUpdates.delete(key);
       }
     }
-
-    // Check if we have a buffered status update for this session
-    const bufferKey = statusBufferKey(session.id, session.project_path);
-    const bufferedStatus = pendingStatusUpdates.get(bufferKey);
 
     console.log(`[SessionStore] addSession id=${session.id} project_path='${session.project_path}'`);
     console.log(`[SessionStore] Buffer key: '${bufferKey}', has buffered status: ${!!bufferedStatus}`);
@@ -258,7 +257,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   },
 
   getSessionsByProject: (projectPath: string) => {
-    return get().sessions.filter((s) => s.project_path === projectPath);
+    const normalize = (p: string) => p.replace(/^\/private\//, "/").replace(/\/$/, "");
+    return get().sessions.filter((s) => normalize(s.project_path) === normalize(projectPath));
   },
 
   initListeners: async () => {
@@ -269,10 +269,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           pendingInit = listen<SessionStatusPayload>("session-status-changed", (event) => {
             const { session_id, project_path, status, message, needs_input_prompt } = event.payload;
 
-            // Check if session exists in store
-            const sessionExists = get().sessions.some(
-              (s) => s.id === session_id && s.project_path === project_path
-            );
+            // Check if session exists in store (match only on session_id)
+            const sessionExists = get().sessions.some((s) => s.id === session_id);
 
             if (!sessionExists) {
               // Buffer this status update - it will be applied when the session is added
@@ -289,7 +287,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
             set((state) => ({
               sessions: state.sessions.map((s) =>
-                s.id === session_id && s.project_path === project_path
+                s.id === session_id
                   ? {
                       ...s,
                       status,

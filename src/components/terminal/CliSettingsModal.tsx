@@ -1,4 +1,4 @@
-import { AlertTriangle, RotateCcw, Terminal, X } from "lucide-react";
+import { AlertTriangle, FolderOpen, RotateCcw, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useCliSettingsStore } from "@/stores/useCliSettingsStore";
 import { AI_CLI_CONFIG, buildCliCommand, type CliAiMode } from "@/lib/terminal";
@@ -8,7 +8,7 @@ interface CliSettingsModalProps {
 }
 
 /** The AI modes that support CLI flags. */
-const CLI_MODES: CliAiMode[] = ["Claude", "Gemini", "Codex", "OpenCode"];
+const CLI_MODES: CliAiMode[] = ["Claude", "Gemini", "Codex", "OpenCode", "Pi"];
 
 /** Mode display configuration */
 const MODE_CONFIG: Record<CliAiMode, { color: string; bgColor: string; skipFlagName: string }> = {
@@ -32,6 +32,11 @@ const MODE_CONFIG: Record<CliAiMode, { color: string; bgColor: string; skipFlagN
     bgColor: "bg-purple-500/20",
     skipFlagName: "--dangerously-skip-permissions",
   },
+  Pi: {
+    color: "text-emerald-500",
+    bgColor: "bg-emerald-500/20",
+    skipFlagName: "",
+  },
 };
 
 /**
@@ -42,7 +47,7 @@ export function CliSettingsModal({ onClose }: CliSettingsModalProps) {
   const modalRef = useRef<HTMLDivElement>(null);
   const [activeMode, setActiveMode] = useState<CliAiMode>("Claude");
 
-  const { flags, setSkipPermissions, setCustomFlags, resetModeToDefaults, resetAllToDefaults } =
+  const { flags, setSkipPermissions, setCustomFlags, setMintletPath, resetModeToDefaults, resetAllToDefaults } =
     useCliSettingsStore();
 
   // Close on outside click
@@ -115,44 +120,69 @@ export function CliSettingsModal({ onClose }: CliSettingsModalProps) {
 
         {/* Content */}
         <div className="space-y-4 p-4">
-          {/* Skip Permissions Toggle */}
-          <section>
-            <div className="mb-2 flex items-center gap-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-maestro-muted">
-                Permissions
-              </h3>
-              <span className="rounded bg-maestro-red/20 px-1.5 py-0.5 text-[10px] font-medium text-maestro-red">
-                Security
-              </span>
-            </div>
-            <div className="rounded-lg border border-maestro-border bg-maestro-card p-3">
-              <label className="flex cursor-pointer items-start gap-3">
+          {/* Pi mode: Mintlet path input */}
+          {activeMode === "Pi" ? (
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <FolderOpen size={14} className="text-emerald-500" />
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-maestro-muted">
+                  Mintlet Extension Path
+                </h3>
+              </div>
+              <div className="rounded-lg border border-maestro-border bg-maestro-card p-3">
                 <input
-                  type="checkbox"
-                  checked={currentFlags.skipPermissions}
-                  onChange={(e) => setSkipPermissions(activeMode, e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-maestro-border accent-maestro-accent"
+                  type="text"
+                  value={currentFlags.mintletPath ?? ""}
+                  onChange={(e) => setMintletPath(activeMode, e.target.value)}
+                  placeholder="/absolute/path/to/mintlet.ts"
+                  className="w-full rounded border border-maestro-border bg-maestro-bg px-3 py-2 text-sm text-maestro-text placeholder:text-maestro-muted/50 focus:border-maestro-accent focus:outline-none"
                 />
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-maestro-text">
-                      Skip Permission Prompts
-                    </span>
-                    {currentFlags.skipPermissions && (
-                      <span className="flex items-center gap-1 rounded bg-maestro-red/20 px-1.5 py-0.5 text-[10px] font-medium text-maestro-red">
-                        <AlertTriangle size={10} />
-                        Risk
+                <p className="mt-2 text-xs text-maestro-muted">
+                  Absolute path to <code className="rounded bg-maestro-border/40 px-1">mintlet.ts</code>.
+                  Passed as <code className="rounded bg-maestro-border/40 px-1">pi -e &lt;path&gt;</code>. Leave empty to run <code className="rounded bg-maestro-border/40 px-1">pi</code> without an extension.
+                </p>
+              </div>
+            </section>
+          ) : (
+            /* Skip Permissions Toggle — not applicable to Pi */
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-maestro-muted">
+                  Permissions
+                </h3>
+                <span className="rounded bg-maestro-red/20 px-1.5 py-0.5 text-[10px] font-medium text-maestro-red">
+                  Security
+                </span>
+              </div>
+              <div className="rounded-lg border border-maestro-border bg-maestro-card p-3">
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={currentFlags.skipPermissions}
+                    onChange={(e) => setSkipPermissions(activeMode, e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-maestro-border accent-maestro-accent"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-maestro-text">
+                        Skip Permission Prompts
                       </span>
-                    )}
+                      {currentFlags.skipPermissions && (
+                        <span className="flex items-center gap-1 rounded bg-maestro-red/20 px-1.5 py-0.5 text-[10px] font-medium text-maestro-red">
+                          <AlertTriangle size={10} />
+                          Risk
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-xs text-maestro-muted">
+                      Adds <code className="rounded bg-maestro-border/40 px-1">{MODE_CONFIG[activeMode].skipFlagName}</code> flag.
+                      The CLI will not ask for confirmation before running commands.
+                    </p>
                   </div>
-                  <p className="mt-0.5 text-xs text-maestro-muted">
-                    Adds <code className="rounded bg-maestro-border/40 px-1">{MODE_CONFIG[activeMode].skipFlagName}</code> flag.
-                    The CLI will not ask for confirmation before running commands.
-                  </p>
-                </div>
-              </label>
-            </div>
-          </section>
+                </label>
+              </div>
+            </section>
+          )}
 
           {/* Custom Flags */}
           <section>
